@@ -214,7 +214,7 @@ async function openSocket() {
 
   // Pesan masuk dari pelanggan -> auto-reply / tiket Inbox
   s.ev.on("messages.upsert", (upsert) => {
-    // Log paling awal: membuktikan Baileys benar-benar menangkap pesan (sebelum filter apa pun)
+    // Log paling awal...
     if (INBOX_DEBUG) {
       console.log(
         `📨 [Baileys] messages.upsert diterima: type=${upsert?.type} jumlah=${upsert?.messages?.length ?? 0}`,
@@ -222,8 +222,18 @@ async function openSocket() {
     }
     if (s !== sock) {
       if (INBOX_DEBUG) console.log("📨 diabaikan: event dari socket lama");
-      return; // abaikan event dari socket lama
+      return;
     }
+
+    // --- TAMBAHKAN KODE FILTER INI ---
+    // Abaikan pesan sinkronisasi lama, hanya proses pesan notifikasi baru
+    if (upsert.type !== "notify") return;
+
+    // Abaikan jika pesan dikirim oleh bot/kita sendiri
+    const msg = upsert.messages[0];
+    if (!msg || !msg.message || msg.key.fromMe) return;
+    // ---------------------------------
+
     inbox.handleUpsert(s, upsert, { send: sendDirect }).catch((err) => {
       console.error("❌ Inbox:", err.message);
     });

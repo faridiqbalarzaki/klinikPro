@@ -882,7 +882,7 @@ const HAS_FRONTEND = fs.existsSync(path.join(DIST_DIR, "index.html"));
 if (HAS_FRONTEND) {
   app.use(express.static(DIST_DIR));
   // Semua alamat non-API diarahkan ke index.html (aplikasi satu halaman)
-  app.use((req, res, next) => {
+  app.get("*", (req, res, next) => {
     if (req.method !== "GET" || req.path.startsWith("/uploads/")) return next();
     res.sendFile(path.join(DIST_DIR, "index.html"));
   });
