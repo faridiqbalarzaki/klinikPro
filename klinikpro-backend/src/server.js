@@ -213,6 +213,123 @@ app.delete(
   }),
 );
 
+// Edit template: ubah nama, isi, keyword, dan gambar.
+// "images" berisi nama file lama (dipertahankan) dan/atau data URL baru (disimpan).
+// Jika "images" tidak dikirim, gambar tidak diubah.
+app.put(
+  "/api/templates/:id",
+  route(async (req, res) => {
+    const id = toId(req.params.id);
+    if (!id) return res.status(400).json({ error: "ID template tidak valid." });
+
+    const cur = await db.query("SELECT type FROM templates WHERE id = $1", [
+      id,
+    ]);
+    if (cur.rowCount === 0) {
+      return res.status(404).json({ error: "Template tidak ditemukan." });
+    }
+    const type = cur.rows[0].type; // jenis template tidak diubah lewat edit
+
+    const name = String(req.body?.name ?? "").trim();
+    const content = String(req.body?.content ?? "").trim();
+    if (!name || !content) {
+      return res
+        .status(400)
+        .json({ error: "Nama dan isi template wajib diisi." });
+    }
+
+    const SLOTS = ["followup", "rencana", "pengiriman"];
+    const timeSlot =
+      type === "manual_fu" && SLOTS.includes(req.body?.time_slot)
+        ? req.body.time_slot
+        : null;
+
+    const rawKeywords = Array.isArray(req.body?.keywords)
+      ? req.body.keywords
+      : String(req.body?.keywords ?? "").split(",");
+    const keywords = [
+      ...new Set(
+        rawKeywords
+          .map((k) => String(k).trim().toLowerCase().slice(0, 60))
+          .filter(Boolean),
+      ),
+    ].slice(0, 30);
+    if (type === "auto_reply" && keywords.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Template auto-reply wajib punya minimal 1 keyword." });
+    }
+
+    const oldRes = await db.query(
+      "SELECT file_name FROM template_images WHERE template_id = $1 ORDER BY position, id",
+      [id],
+    );
+    const oldFiles = oldRes.rows.map((r) => r.file_name);
+
+    const imagesProvided = Array.isArray(req.body?.images);
+    const list = imagesProvided ? media.toImageList(req.body.images) : oldFiles;
+    if (list.length > 5) {
+      return res.status(400).json({ error: "Maksimal 5 gambar per template." });
+    }
+    // Nama file yang dikirim harus milik template ini (cegah akses file lain)
+    const oldSet = new Set(oldFiles);
+    for (const item of list) {
+      if (!media.isDataUrl(item) && !oldSet.has(item)) {
+        return res.status(400).json({ error: "Gambar tidak valid." });
+      }
+    }
+
+    // Simpan gambar baru, lalu susun daftar akhir sesuai urutan dari frontend
+    const savedNew = media.saveDataUrls(list.filter(media.isDataUrl));
+    let n = 0;
+    const finalFiles = [
+      ...new Set(list.map((it) => (media.isDataUrl(it) ? savedNew[n++] : it))),
+    ];
+
+    const client = await db.getClient();
+    try {
+      await client.query("BEGIN");
+      const upd = await client.query(
+        `UPDATE templates
+         SET name = $2, content = $3, keywords = $4::text[], time_slot = $5
+         WHERE id = $1
+         RETURNING id, name, content, type, keywords, time_slot`,
+        [id, name.slice(0, 255), content, keywords, timeSlot],
+      );
+      if (imagesProvided) {
+        await client.query(
+          "DELETE FROM template_images WHERE template_id = $1",
+          [id],
+        );
+        if (finalFiles.length > 0) {
+          await client.query(
+            `INSERT INTO template_images (template_id, file_name, position)
+             SELECT $1::int, f.file_name, f.position - 1
+             FROM unnest($2::text[]) WITH ORDINALITY AS f(file_name, position)`,
+            [id, finalFiles],
+          );
+        }
+      }
+      await client.query("COMMIT");
+
+      // Hapus file fisik yang sudah tidak dipakai (batch punya salinan sendiri)
+      if (imagesProvided) {
+        media.removeImages(oldFiles.filter((f) => !finalFiles.includes(f)));
+      }
+      res.json({
+        ...upd.rows[0],
+        images: imagesProvided ? finalFiles : oldFiles,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      media.removeImages(savedNew); // buang file baru jika DB gagal
+      throw err;
+    } finally {
+      client.release();
+    }
+  }),
+);
+
 app.put(
   "/api/templates/:id/group",
   route(async (req, res) => {
@@ -880,10 +997,32 @@ const DIST_DIR =
   process.env.FRONTEND_DIST || path.join(__dirname, "..", "..", "dist");
 const HAS_FRONTEND = fs.existsSync(path.join(DIST_DIR, "index.html"));
 if (HAS_FRONTEND) {
-  app.use(express.static(DIST_DIR));
-  // Semua alamat non-API diarahkan ke index.html (aplikasi satu halaman)
+  app.use(
+    express.static(DIST_DIR, {
+      setHeaders: (res, filePath) => {
+        const base = path.basename(filePath);
+        // File ini harus selalu dicek ulang ke server agar update PWA cepat sampai
+        if (["sw.js", "index.html", "manifest.json"].includes(base)) {
+          res.setHeader("Cache-Control", "no-cache");
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          // Nama file di /assets berisi hash isi, aman di-cache lama
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
+      },
+    }),
+  );
+  // Semua alamat non-API diarahkan ke index.html (aplikasi satu halaman).
+  // Permintaan berekstensi (sw.js, .js, .png, ...) yang tidak ditemukan harus 404,
+  // bukan index.html, agar service worker/aset lama tidak salah terbaca sebagai HTML.
   app.use((req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/uploads/")) return next();
+    if (
+      req.method !== "GET" ||
+      req.path.startsWith("/uploads/") ||
+      path.extname(req.path)
+    ) {
+      return next();
+    }
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(DIST_DIR, "index.html"));
   });
 }

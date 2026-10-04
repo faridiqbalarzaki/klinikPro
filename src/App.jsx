@@ -18,6 +18,7 @@ import {
   Tag,
   Users,
   Trash2,
+  Pencil,
   FileText,
   Search,
   MessageSquare,
@@ -36,6 +37,15 @@ import {
   Tags,
 } from "lucide-react";
 import "./design.css";
+
+// PWA: daftarkan service worker hanya di production (HTTPS / localhost)
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/sw.js")
+      .catch((err) => console.warn("Service worker gagal didaftarkan:", err));
+  });
+}
 
 // ==========================================
 // 1. KONFIGURASI & UTILITAS
@@ -1863,7 +1873,275 @@ const LabelsTab = () => {
 // ==========================================
 // 8. TAB: TEMPLATE (gambar maks 5 + kategori waktu)
 // ==========================================
-const TemplateCard = ({ t, onDelete, onSetGroup }) => {
+// Modal edit template: ubah nama, isi pesan (per bubble), keyword, dan gambar.
+const EditTemplateModal = ({ template, onClose, onSaved }) => {
+  const { notify } = useContext(AppContext);
+  const isAuto = template.type === "auto_reply";
+  const group = !isAuto ? GROUP_BY_ID[template.time_slot] : null;
+  const usesParts = !!group && group.parts.length > 1;
+
+  const [name, setName] = useState(template.name || "");
+  const [content, setContent] = useState(template.content || "");
+  const [partTexts, setPartTexts] = useState(() => {
+    if (!usesParts) return [];
+    const parts = splitBubbles(template.content);
+    return group.parts.map((_, i) => parts[i] || "");
+  });
+  const [keywords, setKeywords] = useState(
+    (template.keywords || []).join(", "),
+  );
+  const [images, setImages] = useState(template.images || []); // nama file lama / data URL baru
+  const [saving, setSaving] = useState(false);
+
+  // Esc menutup modal, scroll halaman dikunci selama modal terbuka
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && !saving && onClose();
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose, saving]);
+
+  const addFiles = (fileList) => {
+    const files = Array.from(fileList || []);
+    const slots = MAX_IMAGES - images.length;
+    if (files.length === 0) return;
+    if (slots <= 0) {
+      notify("error", `Maksimal ${MAX_IMAGES} gambar per template.`);
+      return;
+    }
+    const accepted = [];
+    for (const file of files.slice(0, slots)) {
+      if (!IMAGE_TYPES.includes(file.type)) {
+        notify(
+          "error",
+          `"${file.name}" dilewati: gunakan JPG, PNG, atau WEBP.`,
+        );
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        notify("error", `"${file.name}" dilewati: ukuran maksimal 5 MB.`);
+        continue;
+      }
+      accepted.push(file);
+    }
+    Promise.all(
+      accepted.map(
+        (file) =>
+          new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(String(e.target.result));
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(file);
+          }),
+      ),
+    ).then((urls) =>
+      setImages((prev) =>
+        [...prev, ...urls.filter(Boolean)].slice(0, MAX_IMAGES),
+      ),
+    );
+  };
+
+  const handleSave = async () => {
+    const finalContent = usesParts
+      ? partTexts
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .join(`\n${BUBBLE_SEP}\n`)
+      : content.trim();
+
+    if (!name.trim() || !finalContent) {
+      notify("error", "Nama dan isi template wajib diisi.");
+      return;
+    }
+    if (usesParts && partTexts.some((t) => !t.trim())) {
+      notify("error", "Isi kedua bubble chat terlebih dulu.");
+      return;
+    }
+    if (isAuto && !keywords.trim()) {
+      notify("error", "Template auto-reply wajib punya minimal 1 keyword.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        name: name.trim(),
+        content: finalContent,
+        time_slot: template.time_slot || "",
+        images,
+      };
+      if (isAuto) payload.keywords = keywords;
+      const saved = await api(`/api/templates/${template.id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      onSaved(saved);
+      notify("success", "Template berhasil diperbarui!");
+      onClose();
+    } catch (err) {
+      notify("error", `Gagal menyimpan perubahan: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const labelCls = "block text-xs font-semibold text-gray-500 mb-1.5";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-4"
+      onClick={() => !saving && onClose()}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Edit template ${template.name}`}
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white w-full sm:max-w-xl max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl shadow-xl p-5 sm:p-7"
+      >
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+            <Pencil className="w-5 h-5 text-pink-500" />
+            Edit Template
+          </h3>
+          <button
+            aria-label="Tutup"
+            onClick={onClose}
+            disabled={saving}
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className={labelCls}>Nama Template</label>
+            <input
+              className={inputBase}
+              value={name}
+              maxLength={255}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+
+          {usesParts ? (
+            group.parts.map((p, i) => (
+              <div key={p.label}>
+                <label className={labelCls}>{p.label}</label>
+                <textarea
+                  rows={5}
+                  className={`${inputBase} resize-y`}
+                  placeholder={p.placeholder}
+                  value={partTexts[i] || ""}
+                  onChange={(e) =>
+                    setPartTexts((prev) =>
+                      prev.map((t, j) => (j === i ? e.target.value : t)),
+                    )
+                  }
+                />
+              </div>
+            ))
+          ) : (
+            <div>
+              <label className={labelCls}>Isi Pesan</label>
+              <textarea
+                rows={7}
+                className={`${inputBase} resize-y`}
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+              />
+            </div>
+          )}
+
+          {isAuto && (
+            <div>
+              <label className={labelCls}>Keyword (pisahkan dengan koma)</label>
+              <input
+                className={inputBase}
+                value={keywords}
+                onChange={(e) => setKeywords(e.target.value)}
+              />
+            </div>
+          )}
+
+          <div>
+            <label className={labelCls}>
+              Gambar ({images.length}/{MAX_IMAGES})
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {images.map((img, i) => (
+                <div
+                  key={`${img.slice(0, 40)}-${i}`}
+                  className="relative w-20 h-20"
+                >
+                  <img
+                    src={imageSrc(img)}
+                    alt={`Gambar ${i + 1}`}
+                    className="w-full h-full rounded-xl object-cover border border-gray-200 bg-gray-50"
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Hapus gambar ${i + 1}`}
+                    onClick={() =>
+                      setImages((p) => p.filter((_, j) => j !== i))
+                    }
+                    className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-500 text-white flex items-center justify-center shadow"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+              {images.length < MAX_IMAGES && (
+                <label className="w-20 h-20 rounded-xl border-2 border-dashed border-gray-300 hover:border-pink-400 text-gray-400 hover:text-pink-500 flex items-center justify-center cursor-pointer transition-colors">
+                  <Plus className="w-6 h-6" />
+                  <input
+                    type="file"
+                    multiple
+                    hidden
+                    accept={IMAGE_TYPES.join(",")}
+                    onChange={(e) => {
+                      addFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              )}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-2">
+              Gambar yang rusak bisa dihapus lalu diunggah ulang. Batch yang
+              sudah dibuat tidak ikut berubah.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6">
+          <button
+            onClick={onClose}
+            disabled={saving}
+            className="px-5 py-2.5 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-100"
+          >
+            Batal
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-pink-500 hover:bg-pink-600 disabled:opacity-50 flex items-center gap-2"
+          >
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+            {saving ? "Menyimpan..." : "Simpan Perubahan"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const TemplateCard = ({ t, onDelete, onSetGroup, onEdit }) => {
   const slot = GROUP_BY_ID[t.time_slot];
   return (
     <div className="border border-gray-200 rounded-2xl p-4 hover:border-pink-300 hover:shadow-sm transition-all bg-white flex flex-col gap-3 group">
@@ -1895,13 +2173,22 @@ const TemplateCard = ({ t, onDelete, onSetGroup }) => {
             </div>
           </div>
         </div>
-        <button
-          aria-label={`Hapus template ${t.name}`}
-          onClick={() => onDelete(t.id)}
-          className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
-        >
-          <Trash2 className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            aria-label={`Edit template ${t.name}`}
+            onClick={() => onEdit(t)}
+            className="p-2 rounded-lg text-gray-400 hover:text-pink-500 hover:bg-pink-50 transition-colors"
+          >
+            <Pencil className="w-4 h-4" />
+          </button>
+          <button
+            aria-label={`Hapus template ${t.name}`}
+            onClick={() => onDelete(t.id)}
+            className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
       </div>
       {t.images?.length > 0 && (
         <div className="flex gap-1.5">
@@ -1953,10 +2240,10 @@ const TemplatesTab = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [slotFilter, setSlotFilter] = useState("semua"); // semua | followup | rencana | pengiriman | umum | auto
+  const [editingTemplate, setEditingTemplate] = useState(null); // state untuk modal edit
 
   const group = GROUP_BY_ID[tplGroup];
   const usesParts = tplType === "manual_fu" && group.parts.length > 1;
-  // Beberapa bubble disimpan dalam 1 template, dipisah penanda [[bubble]]
   const finalContent = usesParts
     ? partTexts
         .slice(0, group.parts.length)
@@ -2107,7 +2394,6 @@ const TemplatesTab = () => {
       })
     : "";
 
-  // Pengelompokan template tersimpan
   const counts = useMemo(() => {
     const manual = templates.filter((t) => t.type !== "auto_reply");
     const c = {
@@ -2182,7 +2468,6 @@ const TemplatesTab = () => {
               />
             </div>
 
-            {/* Jenis template */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Jenis Template
@@ -2224,7 +2509,6 @@ const TemplatesTab = () => {
               )}
             </div>
 
-            {/* Template: FollowUp / Rencana / Pengiriman (hanya Follow-Up / Balasan) */}
             {tplType === "manual_fu" && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -2252,7 +2536,6 @@ const TemplatesTab = () => {
               </div>
             )}
 
-            {/* Zona Upload Gambar (sampai 5) */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2 flex justify-between">
                 <span>
@@ -2323,7 +2606,7 @@ const TemplatesTab = () => {
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                     onChange={(e) => {
                       processFiles(e.target.files);
-                      e.target.value = ""; // izinkan memilih file yang sama lagi
+                      e.target.value = "";
                     }}
                     title="Klik atau Drag & Drop gambar ke sini"
                   />
@@ -2485,6 +2768,7 @@ const TemplatesTab = () => {
                       t={t}
                       onDelete={handleDelete}
                       onSetGroup={handleSetGroup}
+                      onEdit={setEditingTemplate}
                     />
                   ))}
                 </div>
@@ -2493,6 +2777,19 @@ const TemplatesTab = () => {
           </div>
         )}
       </div>
+
+      {/* Modal Edit Template */}
+      {editingTemplate && (
+        <EditTemplateModal
+          template={editingTemplate}
+          onClose={() => setEditingTemplate(null)}
+          onSaved={(updated) =>
+            setTemplates((list) =>
+              list.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)),
+            )
+          }
+        />
+      )}
     </div>
   );
 };
