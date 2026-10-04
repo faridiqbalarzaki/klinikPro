@@ -1,0 +1,5 @@
+node_modules
+.env
+.env.production
+auth_info_baileys
+.wa-worker.lock
