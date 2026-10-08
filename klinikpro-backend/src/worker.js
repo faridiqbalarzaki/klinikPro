@@ -7,6 +7,7 @@ const db = require("./db");
 const media = require("./media");
 const audio = require("./audio");
 const inbox = require("./inbox");
+const priceFlow = require("./priceFlow");
 // Fitur Label WA bersifat tambahan: jika modulnya bermasalah, WhatsApp tetap harus tersambung.
 let labels = null;
 try {
@@ -31,7 +32,11 @@ const fs = require("fs");
 const path = require("path");
 
 const makeWASocket = baileys.makeWASocket || baileys.default;
-const { useMultiFileAuthState, DisconnectReason } = baileys;
+const { useMultiFileAuthState, DisconnectReason, downloadMediaMessage } =
+  baileys;
+// Membuka bungkus pesan (ephemeral / view-once) agar teks & gambarnya terbaca
+const normalizeContent = baileys.normalizeMessageContent || ((m) => m);
+const waLogger = pino({ level: "silent" });
 
 // ==========================================
 // KUNCI PROSES TUNGGAL
@@ -134,6 +139,51 @@ const DISPLAY_TZ = process.env.APP_TIMEZONE || "Asia/Jakarta";
 // Log diagnostik pesan masuk. Matikan di produksi dengan INBOX_DEBUG=false di .env
 const INBOX_DEBUG = process.env.INBOX_DEBUG !== "false";
 
+// --- Alur konsultatif harga & unduhan gambar ---
+// Path dihitung dari folder backend (satu tingkat di atas src/, tempat .env berada),
+// jadi sama dengan "./assets" dan "./downloads" bila server dijalankan dari folder itu.
+const ROOT_DIR = path.join(__dirname, "..");
+const IMAGE_PRODUCT_PATH = path.join(ROOT_DIR, "assets", "glowing-12-hari.jpg");
+const IMAGE_TESTI_PATH = path.join(
+  ROOT_DIR,
+  "assets",
+  "testi-before-after.jpg",
+);
+const DOWNLOAD_DIR = path.join(ROOT_DIR, "downloads");
+const STEP1_DELAY_MS = 1500; // jeda setelah Langkah 1
+const STEP2_DELAY_MS = 2000; // jeda setelah Langkah 2
+
+// Langkah 1: teks sapaan
+const STEP1_SOLUSI_TEXT = "Lizel bantu berikan solusi yaa kak say🤗";
+
+// Langkah 2: caption gambar produk (maks 1024 karakter)
+const STEP2_PRODUCT_CAPTION = [
+  "✨ PAKET GLOWING 12 HARI - FIX NUTRI D&N CREAM ✨",
+  "",
+  "Paket lengkap 3 rangkaian perawatan:",
+  "",
+  "☀️ Day Cream - membantu mencerahkan kulit dan melindungi kulit saat beraktivitas",
+  "🌙 Night Cream - membantu menyamarkan flek dan noda hitam saat kulit beristirahat di malam hari",
+  "🧼 Collagen Beauty Soap - membersihkan lembut dan membantu menjaga kelembapan kulit",
+  "",
+  "💖 Manfaat yang bisa Kakak rasakan:",
+  "• Mencerahkan kulit wajah",
+  "• Menyamarkan flek dan noda hitam",
+  "• Membantu menjaga skin barrier",
+  "• Kulit tampak lebih lembap, halus, dan glowing merata",
+  "",
+  "Gunakan rutin sesuai aturan pakai ya Kak 🤍",
+].join("\n");
+
+// Langkah 3: caption gambar testimoni + closing
+const STEP3_TESTI_CAPTION =
+  "✨ FIX NUTRI GLOW SERIES✨\n\n" +
+  "🤍 Produk ini tidak mengandung merkuri maupun steroid, sehingga aman digunakan sesuai aturan pakai dan tidak menyebabkan ketergantungan.\n\n" +
+  "✅ Sudah terdaftar BPOM\n" +
+  "✅ Bersertifikat Halal\n" +
+  "✅ Cocok digunakan untuk perawatan kulit sehari-hari\n\n" +
+  "😊 Boleh tahu ya Kak, saat ini Kakak berdomisili di Kecamatan mana? Nanti aku cek promo dan estimasi pengiriman ke lokasi Kakak. 📦💖";
+
 // ==========================================
 // STATE
 // ==========================================
@@ -207,7 +257,7 @@ async function openSocket() {
   const s = makeWASocket({
     auth: state,
     printQRInTerminal: false,
-    logger: pino({ level: "silent" }),
+    logger: waLogger,
   });
   sock = s;
 
@@ -226,17 +276,11 @@ async function openSocket() {
       return;
     }
 
-    // --- TAMBAHKAN KODE FILTER INI ---
     // Abaikan pesan sinkronisasi lama, hanya proses pesan notifikasi baru
     if (upsert.type !== "notify") return;
 
-    // Abaikan jika pesan dikirim oleh bot/kita sendiri
-    const msg = upsert.messages[0];
-    if (!msg || !msg.message || msg.key.fromMe) return;
-    // ---------------------------------
-
-    inbox.handleUpsert(s, upsert, { send: sendDirect }).catch((err) => {
-      console.error("❌ Inbox:", err.message);
+    handleIncomingMessages(s, upsert).catch((err) => {
+      console.error("❌ Pesan masuk:", err.message);
     });
   });
 
@@ -335,6 +379,153 @@ function formatTanggal(date) {
     dateStyle: "medium",
     timeZone: DISPLAY_TZ,
   });
+}
+
+// ==========================================
+// PESAN MASUK: ALUR KONSULTATIF HARGA + SIMPAN GAMBAR
+// ==========================================
+const flowBusy = new Set(); // JID yang sedang menerima Langkah 1-3 (cegah kirim ganda)
+
+function extractText(content) {
+  return (
+    content.conversation ||
+    content.extendedTextMessage?.text ||
+    content.imageMessage?.caption ||
+    content.videoMessage?.caption ||
+    ""
+  );
+}
+
+function readAsset(filePath) {
+  try {
+    return fs.readFileSync(filePath);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Kirim gambar + caption. File tidak ada -> kirim teks caption saja.
+async function sendImageOrText(s, jid, filePath, caption) {
+  const buffer = readAsset(filePath);
+  if (!buffer) {
+    console.log(
+      `⚠️  File ${filePath} tidak ditemukan, dikirim sebagai teks saja.`,
+    );
+    return s.sendMessage(jid, { text: caption });
+  }
+  if (caption.length <= CAPTION_LIMIT) {
+    return s.sendMessage(jid, {
+      image: buffer,
+      mimetype: "image/jpeg",
+      caption,
+    });
+  }
+  // Caption melebihi batas WhatsApp: gambar dulu, teks menyusul
+  await s.sendMessage(jid, { image: buffer, mimetype: "image/jpeg" });
+  await sleep(IMAGE_GAP_MIN_MS);
+  return s.sendMessage(jid, { text: caption });
+}
+
+// Langkah 1 -> 2 -> 3 sesuai SOP
+async function sendConsultativeSteps(s, jid) {
+  await s.sendMessage(jid, { text: STEP1_SOLUSI_TEXT });
+  await sleep(STEP1_DELAY_MS);
+  await sendImageOrText(s, jid, IMAGE_PRODUCT_PATH, STEP2_PRODUCT_CAPTION);
+  await sleep(STEP2_DELAY_MS);
+  await sendImageOrText(s, jid, IMAGE_TESTI_PATH, STEP3_TESTI_CAPTION);
+}
+
+// Return true jika pesan sudah ditangani alur harga (tidak diteruskan ke Inbox)
+async function handlePriceFlow(s, jid, content) {
+  const text = extractText(content).trim().toLowerCase();
+  if (!text) return false;
+  if (flowBusy.has(jid)) return false;
+
+  const { STATES } = priceFlow;
+  const state = priceFlow.getState(jid);
+
+  // 1) Tanya harga -> tahan nominal, tanyakan keluhan dulu
+  if (state === STATES.IDLE && priceFlow.isPriceQuestion(text)) {
+    priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
+    try {
+      await s.sendMessage(jid, { text: priceFlow.ASK_COMPLAINT_TEXT });
+    } catch (err) {
+      priceFlow.setState(jid, STATES.IDLE); // pertanyaan tak terkirim, jangan menggantung
+      throw err;
+    }
+    return true;
+  }
+
+  // 2) Keluhan (langsung, atau jawaban setelah ditanya)
+  if (state === STATES.WAITING_FOR_COMPLAINT || priceFlow.isComplaint(text)) {
+    priceFlow.setState(jid, STATES.IDLE);
+    flowBusy.add(jid);
+    try {
+      await sendConsultativeSteps(s, jid);
+    } finally {
+      flowBusy.delete(jid);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+// Unduh gambar masuk ke ./downloads/img_<timestamp>.jpg. Kegagalan hanya dicatat di log.
+async function saveIncomingImage(s, msg) {
+  try {
+    const buffer = await downloadMediaMessage(
+      msg,
+      "buffer",
+      {},
+      { logger: waLogger, reuploadRequest: s.updateMediaMessage },
+    );
+    await fs.promises.mkdir(DOWNLOAD_DIR, { recursive: true });
+
+    let ts = Date.now();
+    for (;;) {
+      const file = path.join(DOWNLOAD_DIR, `img_${ts}.jpg`);
+      try {
+        await fs.promises.writeFile(file, buffer, { flag: "wx" }); // jangan timpa
+        console.log(`🖼️  Gambar masuk disimpan: ${file}`);
+        return;
+      } catch (err) {
+        if (err.code !== "EEXIST") throw err;
+        ts++; // dua gambar di milidetik yang sama
+      }
+    }
+  } catch (err) {
+    console.error("⚠️  Gagal mengunduh/menyimpan gambar masuk:", err.message);
+  }
+}
+
+async function handleIncomingMessages(s, upsert) {
+  for (const msg of upsert.messages || []) {
+    // Abaikan pesan kosong & pesan dari kita sendiri
+    if (!msg?.message || msg.key?.fromMe) continue;
+
+    // Abaikan grup & status/broadcast
+    const jid = msg.key.remoteJid;
+    if (!jid || jid.endsWith("@g.us") || jid.endsWith("@broadcast")) continue;
+
+    const content = normalizeContent(msg.message) || msg.message;
+
+    // 1. Simpan gambar ke disk
+    if (content.imageMessage) {
+      saveIncomingImage(s, msg);
+    }
+
+    // 2. Teruskan seluruh logika ke inbox.js
+    try {
+      await inbox.handleUpsert(
+        s,
+        { ...upsert, messages: [msg] },
+        { send: sendDirect },
+      );
+    } catch (err) {
+      console.error("❌ Inbox:", err.message);
+    }
+  }
 }
 
 // ==========================================

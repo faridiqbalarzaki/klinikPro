@@ -1,3 +1,5 @@
+const path = require("path");
+
 // State percakapan untuk alur konsultatif harga (consultative selling).
 // In-memory: cukup karena worker WhatsApp berjalan satu proses (ada file lock).
 // State hilang jika server restart, dan pelanggan kembali ke IDLE.
@@ -9,11 +11,47 @@ const STATES = Object.freeze({
 // Dicocokkan di AWAL KATA, jadi "harganya" dan "berapaan" ikut terdeteksi.
 const PRICE_KEYWORDS = ["harga", "biaya", "pricelist", "price list", "berapa"];
 
+// Kata keluhan (juga di AWAL KATA). Tambah kata baru di sini bila perlu.
+const COMPLAINT_KEYWORDS = [
+  "flek",
+  "jerawat",
+  "putih",
+  "kering",
+  "merata",
+  "glowing",
+];
+
+// Pilihan menu angka 1-6: hanya dianggap keluhan jika pesannya cuma angka itu
+const COMPLAINT_CHOICE_RE = /^[1-6][.)]?$/;
+
 // Jika pelanggan tak membalas keluhan dalam waktu ini, kembali ke IDLE
 const STATE_TTL_MS = Number(process.env.PRICE_STATE_TTL_MS) || 30 * 60 * 1000;
 
+// Teks SOP: harus persis, jangan diubah
 const ASK_COMPLAINT_TEXT =
-  "Halo Kak! Untuk estimasi biaya perawatan, boleh ceritakan dulu keluhan atau masalah yang sedang dialami agar kami berikan rekomendasi yang pas?";
+  "Hallo kakak sebelum keharga bisa di konsultasikan yaah keluhannya apa? Biar aku bantu untuk kasih saran yang paling cocok untuk kakak 💖✨";
+
+// ---------- Alur solusi setelah keluhan (dipakai inbox.js) ----------
+// Folder gambar: klinikpro-backend/assets/ (bisa diganti lewat ASSET_DIR di .env)
+const ASSET_DIR = process.env.ASSET_DIR || path.join(__dirname, "..", "assets");
+const IMAGE_AWAL_PATH = path.join(ASSET_DIR, "awal.jpeg");
+const IMAGE_TESTI_PATHS = [1, 2, 3, 4].map((n) =>
+  path.join(ASSET_DIR, `testi${n}.jpeg`),
+);
+const IMAGE_AKHIR_PATH = path.join(ASSET_DIR, "akhir.jpeg");
+const STEP1_DELAY_MS = 1500; // jeda setelah teks sapaan
+const STEP2_DELAY_MS = 2000; // jeda antar gambar berikutnya
+
+const STEP1_SOLUSI_TEXT = "Lizel bantu berikan solusi yaa kak say🥰";
+
+// Caption akhir.jpeg (maks 1024 karakter)
+const STEP_AKHIR_CAPTION =
+  "✨ FIX NUTRI GLOW SERIES✨\n\n" +
+  "🤍 Produk ini tidak mengandung merkuri maupun steroid, sehingga aman digunakan sesuai aturan pakai dan tidak menyebabkan ketergantungan.\n\n" +
+  "✅ Sudah terdaftar BPOM\n" +
+  "✅ Bersertifikat Halal\n" +
+  "✅ Cocok digunakan untuk perawatan kulit sehari-hari\n\n" +
+  "😊 Boleh tahu ya Kak, saat ini Kakak berdomisili di Kecamatan mana? Nanti aku cek promo dan estimasi pengiriman ke lokasi Kakak. 📦💖";
 
 // Dipakai hanya jika tidak ada template harga di dashboard
 const FALLBACK_PRICE_TEXT =
@@ -22,6 +60,31 @@ const FALLBACK_PRICE_TEXT =
   "(final menyesuaikan hasil pemeriksaan langsung oleh dokter).\n\n" +
   "Mau kami jadwalkan konsultasi? Balas dengan tanggal & jam yang Kakak inginkan ya 😊";
 
+// ---------- Pencocokan kata kunci ----------
+function buildStartOfWordRegex(keywords) {
+  const parts = keywords.map((k) =>
+    k
+      .trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\s+/g, "\\s+"),
+  );
+  // Awal kata: didahului awal teks atau karakter non huruf/angka
+  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join("|")})`, "iu");
+}
+
+const PRICE_RE = buildStartOfWordRegex(PRICE_KEYWORDS);
+const COMPLAINT_RE = buildStartOfWordRegex(COMPLAINT_KEYWORDS);
+
+function isPriceQuestion(text) {
+  return PRICE_RE.test(String(text || ""));
+}
+
+function isComplaint(text) {
+  const t = String(text || "").trim();
+  return COMPLAINT_CHOICE_RE.test(t) || COMPLAINT_RE.test(t);
+}
+
+// ---------- State ----------
 const store = new Map(); // jid -> { state, at }
 
 function getState(jid) {
@@ -42,8 +105,18 @@ function setState(jid, state) {
 module.exports = {
   STATES,
   PRICE_KEYWORDS,
+  COMPLAINT_KEYWORDS,
   ASK_COMPLAINT_TEXT,
   FALLBACK_PRICE_TEXT,
+  IMAGE_AWAL_PATH,
+  IMAGE_TESTI_PATHS,
+  IMAGE_AKHIR_PATH,
+  STEP1_DELAY_MS,
+  STEP2_DELAY_MS,
+  STEP1_SOLUSI_TEXT,
+  STEP_AKHIR_CAPTION,
+  isPriceQuestion,
+  isComplaint,
   getState,
   setState,
 };

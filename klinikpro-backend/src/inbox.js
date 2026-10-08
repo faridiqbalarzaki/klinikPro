@@ -8,6 +8,7 @@
 const db = require("./db");
 const media = require("./media"); // FITUR BARU: Import media untuk menyimpan gambar pelanggan
 const priceFlow = require("./priceFlow"); // FITUR BARU: alur konsultatif harga
+const fs = require("fs");
 
 // FITUR BARU: Deteksi jika pesan berisi gambar (baik langsung maupun diforward/quoted)
 const isImageMessage = (message) => Boolean(unwrap(message)?.imageMessage);
@@ -294,19 +295,82 @@ async function humanDelay(sock, jid, deps) {
   await deps.sleep(Math.min(TYPING_MS, total));
 }
 
-// Template harga: PRICE_TEMPLATE_ID (opsional) -> atau template auto_reply yang
-// punya keyword harga/biaya/dst. Tidak ketemu -> null (pakai teks cadangan).
-function findPriceTemplate(tpls) {
-  const id = Number(process.env.PRICE_TEMPLATE_ID);
-  if (id) {
-    const t = tpls.find((x) => x.id === id);
-    if (t) return t;
+const CAPTION_LIMIT = 1024; // batas caption gambar di WhatsApp
+
+function readAsset(filePath) {
+  try {
+    return fs.readFileSync(filePath);
+  } catch (_) {
+    return null;
   }
-  for (const kw of priceFlow.PRICE_KEYWORDS) {
-    const t = matchAutoReply(kw, tpls);
-    if (t) return t;
+}
+
+// Kirim SATU image message; caption (jika ada) menempel pada gambar itu.
+// Tidak ada fallback ke teks: asset sudah divalidasi sebelum pengiriman dimulai.
+function sendImageMessage(sock, jid, buffer, caption) {
+  const content = { image: buffer, mimetype: "image/jpeg" };
+  if (caption) content.caption = caption;
+  return sock.sendMessage(jid, content);
+}
+
+// SOP consultative selling (7 pesan): teks -> awal.jpeg + keluhan pelanggan ->
+// testi1..4 (tanpa caption) -> akhir.jpeg + deskripsi FIX NUTRI GLOW SERIES.
+// `complaint` = teks keluhan asli pelanggan; kosong (foto/pesan suara) -> awal.jpeg tanpa caption.
+async function sendConsultativeSteps(
+  sock,
+  jid,
+  sleepFn = sleep,
+  complaint = "",
+) {
+  // Validasi SEMUA asset dulu agar tidak terkirim setengah-setengah / format salah
+  const paths = [
+    priceFlow.IMAGE_AWAL_PATH,
+    ...priceFlow.IMAGE_TESTI_PATHS,
+    priceFlow.IMAGE_AKHIR_PATH,
+  ];
+  const buffers = paths.map(readAsset);
+  const missing = paths.filter((_, i) => !buffers[i]);
+  if (missing.length) {
+    throw new Error(
+      `Alur solusi dibatalkan, asset tidak ditemukan: ${missing.join(", ")}`,
+    );
   }
-  return null;
+  const [awal, testi1, testi2, testi3, testi4, akhir] = buffers;
+
+  if (priceFlow.STEP_AKHIR_CAPTION.length > CAPTION_LIMIT) {
+    throw new Error(
+      `Caption akhir ${priceFlow.STEP_AKHIR_CAPTION.length} karakter, melebihi batas ${CAPTION_LIMIT}.`,
+    );
+  }
+  let awalCaption = String(complaint || "").trim();
+  if (awalCaption.length > CAPTION_LIMIT) {
+    console.log(
+      `⚠️  Keluhan ${awalCaption.length} karakter, dipotong ke ${CAPTION_LIMIT} (batas caption WhatsApp).`,
+    );
+    awalCaption = awalCaption.slice(0, CAPTION_LIMIT);
+  }
+
+  await sock.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
+  await sleepFn(priceFlow.STEP1_DELAY_MS);
+  await sendImageMessage(sock, jid, awal, awalCaption);
+  for (const buf of [testi1, testi2, testi3, testi4]) {
+    await sleepFn(priceFlow.STEP2_DELAY_MS);
+    await sendImageMessage(sock, jid, buf);
+  }
+  await sleepFn(priceFlow.STEP2_DELAY_MS);
+  await sendImageMessage(sock, jid, akhir, priceFlow.STEP_AKHIR_CAPTION);
+}
+
+// Jeda "mengetik..." lalu kirim 7 pesan alur solusi. Jika gagal, hanya dicatat di log
+// supaya keluhan pelanggan tetap masuk tiket untuk CS.
+async function replyConsultative(sock, jid, phone, deps, complaint = "") {
+  await humanDelay(sock, jid, deps);
+  try {
+    await deps.sendSteps(jid, complaint);
+    console.log(`💬 Rangkaian konsultatif (7 pesan) dikirim ke ${phone}`);
+  } catch (err) {
+    console.error("❌ Gagal mengirim rangkaian konsultatif:", err.message);
+  }
 }
 
 async function processMessage(sock, msg, deps) {
@@ -362,26 +426,9 @@ async function processMessage(sock, msg, deps) {
       return { action: "price_gate_repeat" };
     }
 
-    // Keluhan diterima (teks, foto, atau pesan suara) -> reset ke IDLE, kirim estimasi harga
+    // Keluhan diterima (teks, foto, atau pesan suara) -> reset ke IDLE, kirim Langkah 1-3 SOP
     priceFlow.setState(jid, STATES.IDLE);
-    const tpls = (await deps.query(AUTO_REPLY_SQL)).rows;
-    const tpl = findPriceTemplate(tpls);
-    const reply = renderTemplate(
-      tpl?.content ?? priceFlow.FALLBACK_PRICE_TEXT,
-      {
-        nama: msg.pushName,
-        treatment: "",
-        tanggal: new Date().toLocaleDateString("id-ID", {
-          dateStyle: "medium",
-          timeZone: deps.tz,
-        }),
-      },
-    );
-    await humanDelay(sock, jid, deps);
-    const mode = await deps.send(jid, reply, tpl?.images || []);
-    console.log(
-      `💬 Estimasi harga dikirim ke ${phone} (${mode || "teks"}) setelah keluhan`,
-    );
+    await replyConsultative(sock, jid, phone, deps, content.text);
     priceComplaint = true; // lanjut ke bawah: keluhan disimpan sebagai tiket untuk CS
   } else if (
     priceState === STATES.IDLE &&
@@ -399,6 +446,14 @@ async function processMessage(sock, msg, deps) {
     }
     console.log(`💬 Pertanyaan harga dari ${phone} ditahan, menunggu keluhan`);
     return { action: "price_gate" };
+  } else if (
+    priceState === STATES.IDLE &&
+    content.text &&
+    priceFlow.isComplaint(content.text)
+  ) {
+    // Keluhan langsung (tanpa ditanya dulu) -> langsung Langkah 1-3 SOP
+    await replyConsultative(sock, jid, phone, deps, content.text);
+    priceComplaint = true; // keluhan tetap disimpan sebagai tiket untuk CS
   }
 
   // --- 1. Auto-reply (jika cocok: balas, lalu berhenti — tidak ada tiket) ---
@@ -517,6 +572,9 @@ async function handleUpsert(sock, upsert, deps = {}) {
     // FITUR BARU: Berikan akses fungsi downloadImage ke processMessage via depedency injection
     saveMedia: deps.saveMedia || ((m) => downloadImage(sock, m)),
   };
+  d.sendSteps =
+    deps.sendSteps ||
+    ((jid, complaint) => sendConsultativeSteps(sock, jid, d.sleep, complaint));
 
   for (const msg of upsert.messages || []) {
     try {
@@ -537,4 +595,5 @@ module.exports = {
   extractContent,
   resolveJid,
   handleUpsert,
+  sendConsultativeSteps,
 };
