@@ -6,6 +6,7 @@ const path = require("path");
 const STATES = Object.freeze({
   IDLE: "IDLE",
   WAITING_FOR_COMPLAINT: "WAITING_FOR_COMPLAINT",
+  DONE: "DONE",
 });
 
 // Dicocokkan di AWAL KATA, jadi "harganya" dan "berapaan" ikut terdeteksi.

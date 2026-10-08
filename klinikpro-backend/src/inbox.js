@@ -433,41 +433,49 @@ async function processMessage(sock, msg, deps) {
   const { STATES } = priceFlow;
   const normText = normalize(content.text);
   const priceState = priceFlow.getState(jid);
-  let priceComplaint = false; // true = pesan ini adalah keluhan yang dijawab dengan harga
+  let priceComplaint = false;
 
+  // Jika nomor ini sudah pernah selesai konsultasi, abaikan pertanyaan harga selanjutnya
   if (
+    priceState === STATES.DONE &&
+    anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
+  ) {
+    dbg(
+      `Nomor ${phone} sudah pernah masuk alur konsultasi. Pertanyaan harga diabaikan untuk bot.`,
+    );
+    // Biarkan pesan masuk ke tiket CRM agar dibalas manual oleh CS tanpa gangguan bot
+  } else if (
     priceState === STATES.WAITING_FOR_COMPLAINT &&
     (content.text || content.label)
   ) {
-    // Pelanggan mengulang "berapa harganya?" tanpa cerita keluhan -> tanyakan lagi, jangan reset
     const justAskingAgain =
       content.text &&
       !content.hasAttachment &&
       normText.split(" ").length <= 4 &&
       anyPhrase(normText, priceFlow.PRICE_KEYWORDS);
     if (justAskingAgain) {
-      priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT); // perpanjang TTL
+      priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
       await humanDelay(sock, jid, deps);
       await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
       return { action: "price_gate_repeat" };
     }
 
-    // Keluhan diterima (teks, foto, atau pesan suara) -> reset ke IDLE, kirim Langkah 1-3 SOP
-    priceFlow.setState(jid, STATES.IDLE);
+    // Keluhan diterima -> Kirim SOP 1-3, lalu SET STATE KE 'DONE' agar tidak terulang lagi
+    priceFlow.setState(jid, STATES.DONE);
     await replyConsultative(sock, jid, phone, deps, content.text);
-    priceComplaint = true; // lanjut ke bawah: keluhan disimpan sebagai tiket untuk CS
+    priceComplaint = true;
   } else if (
     priceState === STATES.IDLE &&
     content.text &&
     anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
   ) {
-    // Ada keyword harga -> tahan info harga, tanya keluhan
+    // Pertanyaan harga pertama -> Tahan, minta keluhan
     priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
     try {
       await humanDelay(sock, jid, deps);
       await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
     } catch (err) {
-      priceFlow.setState(jid, STATES.IDLE); // jangan terjebak jika kirim gagal
+      priceFlow.setState(jid, STATES.IDLE);
       throw err;
     }
     console.log(`💬 Pertanyaan harga dari ${phone} ditahan, menunggu keluhan`);
@@ -477,9 +485,10 @@ async function processMessage(sock, msg, deps) {
     content.text &&
     priceFlow.isComplaint(content.text)
   ) {
-    // Keluhan langsung (tanpa ditanya dulu) -> langsung Langkah 1-3 SOP
+    // Keluhan langsung tanpa ditanya -> Kirim SOP, lalu set state ke 'DONE'
+    priceFlow.setState(jid, STATES.DONE);
     await replyConsultative(sock, jid, phone, deps, content.text);
-    priceComplaint = true; // keluhan tetap disimpan sebagai tiket untuk CS
+    priceComplaint = true;
   }
 
   // --- 1. Auto-reply (jika cocok: balas, lalu berhenti — tidak ada tiket) ---
