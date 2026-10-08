@@ -324,8 +324,12 @@ async function sendConsultativeSteps(
   sleepFn = sleep,
   complaint = "",
 ) {
-  // Validasi asset dari priceFlow.js
-  const paths = [priceFlow.IMAGE_PRODUCT_PATH, priceFlow.IMAGE_TESTI_PATH];
+  // 1. Validasi path gambar
+  const paths = [
+    priceFlow.IMAGE_PRODUCT_PATH,
+    ...priceFlow.IMAGE_TESTI_PATHS,
+    priceFlow.IMAGE_TESTI_PATH,
+  ];
 
   const buffers = paths.map(readAsset);
   const missing = paths.filter((_, i) => !buffers[i]);
@@ -334,18 +338,18 @@ async function sendConsultativeSteps(
       `Alur solusi dibatalkan, asset tidak ditemukan: ${missing.join(", ")}`,
     );
   }
-  const [awalBuf, akhirBuf] = buffers;
 
-  // Siapkan caption gambar pertama (gabungan keluhan pelanggan dan deskripsi produk)
+  const awalBuf = buffers[0];
+  const testiBufs = buffers.slice(1, 5); // testi1 s.d testi4
+  const akhirBuf = buffers[5];
+
+  // 2. Siapkan caption
   let userComplaint = String(complaint || "").trim();
   let awalCaption = userComplaint
     ? `Keluhan Kakak:\n"${userComplaint}"\n\n${priceFlow.STEP2_PRODUCT_CAPTION}`
     : priceFlow.STEP2_PRODUCT_CAPTION;
 
   if (awalCaption.length > CAPTION_LIMIT) {
-    console.log(
-      `⚠️ Caption awal ${awalCaption.length} karakter, dipotong ke ${CAPTION_LIMIT} (batas WhatsApp).`,
-    );
     awalCaption = awalCaption.slice(0, CAPTION_LIMIT);
   }
 
@@ -354,13 +358,11 @@ async function sendConsultativeSteps(
     akhirCaption = akhirCaption.slice(0, CAPTION_LIMIT);
   }
 
-  // --- Mulai Kirim SOP ---
-  // Langkah 1: Sapaan
-  // --- Mulai Kirim SOP ---
-  // Langkah 1: Sapaan
+  // 3. Eksekusi pengiriman berurutan sesuai jeda
+  // Langkah 1: Sapaan teks
   await sock.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
 
-  // JEDA 4 DETIK + EFEK TYPING SEBELUM GAMBAR PERTAMA
+  // Jeda 4 detik + efek typing sebelum foto pertama
   try {
     await sock.sendPresenceUpdate("composing", jid);
   } catch (_) {}
@@ -369,19 +371,19 @@ async function sendConsultativeSteps(
   // Langkah 2: Gambar Awal + Caption Produk
   await sendImageMessage(sock, jid, awalBuf, awalCaption);
 
-  // JEDA 2,5 DETIK SEBELUM TESTI
+  // Jeda 2,5 detik sebelum kirim testi
   await sleepFn(2500);
 
-  // Langkah Sisipan: Gambar Testi 1, 2, 3, 4 (Dikirim serentak agar jadi 1 pesan/album)
+  // Langkah Sisipan: 4 Gambar Testi dikirim serentak (jadi 1 album)
   const sendTestiPromises = testiBufs.map((buf) =>
     sendImageMessage(sock, jid, buf),
   );
   await Promise.all(sendTestiPromises);
 
-  // JEDA 2 DETIK SEBELUM GAMBAR TERAKHIR
+  // Jeda 2 detik sebelum gambar terakhir
   await sleepFn(2000);
 
-  // Langkah 3: Gambar Akhir + Caption Closing/BPOM
+  // Langkah 3: Gambar Akhir + Caption Closing
   await sendImageMessage(sock, jid, akhirBuf, akhirCaption);
 }
 

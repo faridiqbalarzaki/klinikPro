@@ -383,11 +383,21 @@ async function sendImageOrText(s, jid, filePath, caption) {
 
 // Langkah 1 -> 2 -> 3 sesuai SOP (Terintegrasi dengan priceFlow.js)
 async function sendConsultativeSteps(s, jid) {
-  // Langkah 1: Teks Sapaan
+  // Pastikan file-file gambar ada
+  const paths = [
+    priceFlow.IMAGE_PRODUCT_PATH,
+    ...priceFlow.IMAGE_TESTI_PATHS,
+    priceFlow.IMAGE_TESTI_PATH,
+  ];
+  const buffers = paths.map(readAsset);
+  if (buffers.some((b) => !b)) {
+    throw new Error("Asset gambar alur konsultatif tidak lengkap.");
+  }
+
   // Langkah 1: Teks Sapaan
   await s.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
 
-  // JEDA 4 DETIK + EFEK TYPING SEBELUM GAMBAR PERTAMA
+  // Jeda 4 detik + efek typing
   try {
     await s.sendPresenceUpdate("composing", jid);
   } catch (_) {}
@@ -401,19 +411,19 @@ async function sendConsultativeSteps(s, jid) {
     priceFlow.STEP2_PRODUCT_CAPTION,
   );
 
-  // JEDA 2,5 DETIK SEBELUM TESTI
+  // Jeda 2,5 detik sebelum testi
   await sleep(2500);
 
-  // Langkah Sisipan: Gambar Testi 1, 2, 3, 4 (Dikirim serentak agar jadi 1 pesan/album)
+  // Langkah Sisipan: 4 Gambar Testi dikirim serentak (jadi 1 album)
   const sendTestiPromises = priceFlow.IMAGE_TESTI_PATHS.map((testiPath) =>
     sendImageOrText(s, jid, testiPath, ""),
   );
   await Promise.all(sendTestiPromises);
 
-  // JEDA 2 DETIK SEBELUM GAMBAR TERAKHIR
+  // Jeda 2 detik sebelum gambar terakhir
   await sleep(2000);
 
-  // Langkah 3: Gambar Testi/BPOM (akhir.jpeg)
+  // Langkah 3: Gambar Akhir (akhir.jpeg)
   await sendImageOrText(
     s,
     jid,
