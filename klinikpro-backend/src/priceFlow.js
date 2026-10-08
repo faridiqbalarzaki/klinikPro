@@ -79,11 +79,6 @@ const STEP3_TESTI_CAPTION =
   "😊 Boleh tahu ya Kak, saat ini Kakak berdomisili di Kecamatan mana? Nanti aku cek promo dan estimasi pengiriman ke lokasi Kakak. 📦💖";
 
 // Dipakai hanya jika tidak ada template harga di dashboard
-const FALLBACK_PRICE_TEXT =
-  "Terima kasih sudah bercerita, Kak 🙏\n\n" +
-  "Berdasarkan keluhan Kakak, estimasi biaya perawatan kami mulai dari Rp XXX.000 " +
-  "(final menyesuaikan hasil pemeriksaan langsung oleh dokter).\n\n" +
-  "Mau kami jadwalkan konsultasi? Balas dengan tanggal & jam yang Kakak inginkan ya 😊";
 
 // ---------- Pencocokan kata kunci ----------
 function buildStartOfWordRegex(keywords) {

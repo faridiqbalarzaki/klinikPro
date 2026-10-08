@@ -354,18 +354,31 @@ async function sendConsultativeSteps(
     akhirCaption = akhirCaption.slice(0, CAPTION_LIMIT);
   }
 
-  // --- Mulai Kirim SOP ---
+// --- Mulai Kirim SOP ---
   // Langkah 1: Sapaan
   await sock.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
-  await sleepFn(priceFlow.STEP1_DELAY_MS);
+
+  // JEDA 4 DETIK + EFEK TYPING SEBELUM GAMBAR PERTAMA
+  try {
+    await sock.sendPresenceUpdate("composing", jid);
+  } catch (_) {}
+  await sleepFn(4000);
 
   // Langkah 2: Gambar Awal + Caption Produk
   await sendImageMessage(sock, jid, awalBuf, awalCaption);
-  await sleepFn(priceFlow.STEP2_DELAY_MS);
+  
+  // JEDA 2,5 DETIK SEBELUM TESTI
+  await sleepFn(2500); 
 
-  // Langkah 3: Gambar Akhir + Caption Testi/BPOM
+  // Langkah Sisipan: Gambar Testi 1, 2, 3, 4 (Dikirim serentak agar jadi 1 pesan/album)
+  const sendTestiPromises = testiBufs.map(buf => sendImageMessage(sock, jid, buf));
+  await Promise.all(sendTestiPromises);
+  
+  // JEDA 2 DETIK SEBELUM GAMBAR TERAKHIR
+  await sleepFn(2000); 
+
+  // Langkah 3: Gambar Akhir + Caption Closing/BPOM
   await sendImageMessage(sock, jid, akhirBuf, akhirCaption);
-}
 
 // Jeda "mengetik..." lalu kirim 7 pesan alur solusi. Jika gagal, hanya dicatat di log
 // supaya keluhan pelanggan tetap masuk tiket untuk CS.

@@ -384,8 +384,14 @@ async function sendImageOrText(s, jid, filePath, caption) {
 // Langkah 1 -> 2 -> 3 sesuai SOP (Terintegrasi dengan priceFlow.js)
 async function sendConsultativeSteps(s, jid) {
   // Langkah 1: Teks Sapaan
+  // Langkah 1: Teks Sapaan
   await s.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
-  await sleep(priceFlow.STEP1_DELAY_MS);
+
+  // JEDA 4 DETIK + EFEK TYPING SEBELUM GAMBAR PERTAMA
+  try {
+    await s.sendPresenceUpdate("composing", jid);
+  } catch (_) {}
+  await sleep(4000);
 
   // Langkah 2: Gambar Produk (awal.jpeg)
   await sendImageOrText(
@@ -394,7 +400,18 @@ async function sendConsultativeSteps(s, jid) {
     priceFlow.IMAGE_PRODUCT_PATH,
     priceFlow.STEP2_PRODUCT_CAPTION,
   );
-  await sleep(priceFlow.STEP2_DELAY_MS);
+
+  // JEDA 2,5 DETIK SEBELUM TESTI
+  await sleep(2500);
+
+  // Langkah Sisipan: Gambar Testi 1, 2, 3, 4 (Dikirim serentak agar jadi 1 pesan/album)
+  const sendTestiPromises = priceFlow.IMAGE_TESTI_PATHS.map((testiPath) =>
+    sendImageOrText(s, jid, testiPath, ""),
+  );
+  await Promise.all(sendTestiPromises);
+
+  // JEDA 2 DETIK SEBELUM GAMBAR TERAKHIR
+  await sleep(2000);
 
   // Langkah 3: Gambar Testi/BPOM (akhir.jpeg)
   await sendImageOrText(
