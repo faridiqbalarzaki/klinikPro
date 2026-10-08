@@ -34,18 +34,43 @@ const ASK_COMPLAINT_TEXT =
 // ---------- Alur solusi setelah keluhan (dipakai inbox.js) ----------
 // Folder gambar: klinikpro-backend/assets/ (bisa diganti lewat ASSET_DIR di .env)
 const ASSET_DIR = process.env.ASSET_DIR || path.join(__dirname, "..", "assets");
-const IMAGE_AWAL_PATH = path.join(ASSET_DIR, "awal.jpeg");
+
+// Path gambar sesuai dengan ekstensi .jpeg di folder assets
+const IMAGE_PRODUCT_PATH = path.join(ASSET_DIR, "awal.jpeg");
+const IMAGE_TESTI_PATH = path.join(ASSET_DIR, "akhir.jpeg");
+
+// Variabel bawaan tetap dipertahankan agar tidak bentrok dengan inbox.js
+const IMAGE_AWAL_PATH = IMAGE_PRODUCT_PATH;
 const IMAGE_TESTI_PATHS = [1, 2, 3, 4].map((n) =>
   path.join(ASSET_DIR, `testi${n}.jpeg`),
 );
-const IMAGE_AKHIR_PATH = path.join(ASSET_DIR, "akhir.jpeg");
+const IMAGE_AKHIR_PATH = IMAGE_TESTI_PATH;
+
 const STEP1_DELAY_MS = 1500; // jeda setelah teks sapaan
 const STEP2_DELAY_MS = 2000; // jeda antar gambar berikutnya
 
-const STEP1_SOLUSI_TEXT = "Lizel bantu berikan solusi yaa kak say🥰";
+// Teks SOP 3 Langkah
+const STEP1_SOLUSI_TEXT = "Lizel bantu berikan solusi yaa kak say🤗";
 
-// Caption akhir.jpeg (maks 1024 karakter)
-const STEP_AKHIR_CAPTION =
+const STEP2_PRODUCT_CAPTION = [
+  "✨ PAKET GLOWING 12 HARI - FIX NUTRI D&N CREAM ✨",
+  "",
+  "Paket lengkap 3 rangkaian perawatan:",
+  "",
+  "☀️ Day Cream - membantu mencerahkan kulit dan melindungi kulit saat beraktivitas",
+  "🌙 Night Cream - membantu menyamarkan flek dan noda hitam saat kulit beristirahat di malam hari",
+  "🧼 Collagen Beauty Soap - membersihkan lembut dan membantu menjaga kelembapan kulit",
+  "",
+  "💖 Manfaat yang bisa Kakak rasakan:",
+  "• Mencerahkan kulit wajah",
+  "• Menyamarkan flek dan noda hitam",
+  "• Membantu menjaga skin barrier",
+  "• Kulit tampak lebih lembap, halus, dan glowing merata",
+  "",
+  "Gunakan rutin sesuai aturan pakai ya Kak 🤍",
+].join("\n");
+
+const STEP3_TESTI_CAPTION =
   "✨ FIX NUTRI GLOW SERIES✨\n\n" +
   "🤍 Produk ini tidak mengandung merkuri maupun steroid, sehingga aman digunakan sesuai aturan pakai dan tidak menyebabkan ketergantungan.\n\n" +
   "✅ Sudah terdaftar BPOM\n" +
@@ -108,13 +133,24 @@ module.exports = {
   COMPLAINT_KEYWORDS,
   ASK_COMPLAINT_TEXT,
   FALLBACK_PRICE_TEXT,
+
+  // Ekspor Path Gambar
+  IMAGE_PRODUCT_PATH,
+  IMAGE_TESTI_PATH,
   IMAGE_AWAL_PATH,
   IMAGE_TESTI_PATHS,
   IMAGE_AKHIR_PATH,
+
+  // Ekspor Delay
   STEP1_DELAY_MS,
   STEP2_DELAY_MS,
+
+  // Ekspor Teks
   STEP1_SOLUSI_TEXT,
-  STEP_AKHIR_CAPTION,
+  STEP2_PRODUCT_CAPTION,
+  STEP3_TESTI_CAPTION,
+  STEP_AKHIR_CAPTION: STEP3_TESTI_CAPTION, // Alias agar kode lama tidak terganggu
+
   isPriceQuestion,
   isComplaint,
   getState,

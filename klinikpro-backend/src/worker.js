@@ -139,51 +139,6 @@ const DISPLAY_TZ = process.env.APP_TIMEZONE || "Asia/Jakarta";
 // Log diagnostik pesan masuk. Matikan di produksi dengan INBOX_DEBUG=false di .env
 const INBOX_DEBUG = process.env.INBOX_DEBUG !== "false";
 
-// --- Alur konsultatif harga & unduhan gambar ---
-// Path dihitung dari folder backend (satu tingkat di atas src/, tempat .env berada),
-// jadi sama dengan "./assets" dan "./downloads" bila server dijalankan dari folder itu.
-const ROOT_DIR = path.join(__dirname, "..");
-const IMAGE_PRODUCT_PATH = path.join(ROOT_DIR, "assets", "glowing-12-hari.jpg");
-const IMAGE_TESTI_PATH = path.join(
-  ROOT_DIR,
-  "assets",
-  "testi-before-after.jpg",
-);
-const DOWNLOAD_DIR = path.join(ROOT_DIR, "downloads");
-const STEP1_DELAY_MS = 1500; // jeda setelah Langkah 1
-const STEP2_DELAY_MS = 2000; // jeda setelah Langkah 2
-
-// Langkah 1: teks sapaan
-const STEP1_SOLUSI_TEXT = "Lizel bantu berikan solusi yaa kak say🤗";
-
-// Langkah 2: caption gambar produk (maks 1024 karakter)
-const STEP2_PRODUCT_CAPTION = [
-  "✨ PAKET GLOWING 12 HARI - FIX NUTRI D&N CREAM ✨",
-  "",
-  "Paket lengkap 3 rangkaian perawatan:",
-  "",
-  "☀️ Day Cream - membantu mencerahkan kulit dan melindungi kulit saat beraktivitas",
-  "🌙 Night Cream - membantu menyamarkan flek dan noda hitam saat kulit beristirahat di malam hari",
-  "🧼 Collagen Beauty Soap - membersihkan lembut dan membantu menjaga kelembapan kulit",
-  "",
-  "💖 Manfaat yang bisa Kakak rasakan:",
-  "• Mencerahkan kulit wajah",
-  "• Menyamarkan flek dan noda hitam",
-  "• Membantu menjaga skin barrier",
-  "• Kulit tampak lebih lembap, halus, dan glowing merata",
-  "",
-  "Gunakan rutin sesuai aturan pakai ya Kak 🤍",
-].join("\n");
-
-// Langkah 3: caption gambar testimoni + closing
-const STEP3_TESTI_CAPTION =
-  "✨ FIX NUTRI GLOW SERIES✨\n\n" +
-  "🤍 Produk ini tidak mengandung merkuri maupun steroid, sehingga aman digunakan sesuai aturan pakai dan tidak menyebabkan ketergantungan.\n\n" +
-  "✅ Sudah terdaftar BPOM\n" +
-  "✅ Bersertifikat Halal\n" +
-  "✅ Cocok digunakan untuk perawatan kulit sehari-hari\n\n" +
-  "😊 Boleh tahu ya Kak, saat ini Kakak berdomisili di Kecamatan mana? Nanti aku cek promo dan estimasi pengiriman ke lokasi Kakak. 📦💖";
-
 // ==========================================
 // STATE
 // ==========================================
@@ -426,13 +381,28 @@ async function sendImageOrText(s, jid, filePath, caption) {
   return s.sendMessage(jid, { text: caption });
 }
 
-// Langkah 1 -> 2 -> 3 sesuai SOP
+// Langkah 1 -> 2 -> 3 sesuai SOP (Terintegrasi dengan priceFlow.js)
 async function sendConsultativeSteps(s, jid) {
-  await s.sendMessage(jid, { text: STEP1_SOLUSI_TEXT });
-  await sleep(STEP1_DELAY_MS);
-  await sendImageOrText(s, jid, IMAGE_PRODUCT_PATH, STEP2_PRODUCT_CAPTION);
-  await sleep(STEP2_DELAY_MS);
-  await sendImageOrText(s, jid, IMAGE_TESTI_PATH, STEP3_TESTI_CAPTION);
+  // Langkah 1: Teks Sapaan
+  await s.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
+  await sleep(priceFlow.STEP1_DELAY_MS);
+
+  // Langkah 2: Gambar Produk (awal.jpeg)
+  await sendImageOrText(
+    s,
+    jid,
+    priceFlow.IMAGE_PRODUCT_PATH,
+    priceFlow.STEP2_PRODUCT_CAPTION,
+  );
+  await sleep(priceFlow.STEP2_DELAY_MS);
+
+  // Langkah 3: Gambar Testi/BPOM (akhir.jpeg)
+  await sendImageOrText(
+    s,
+    jid,
+    priceFlow.IMAGE_TESTI_PATH,
+    priceFlow.STEP3_TESTI_CAPTION,
+  );
 }
 
 // Return true jika pesan sudah ditangani alur harga (tidak diteruskan ke Inbox)

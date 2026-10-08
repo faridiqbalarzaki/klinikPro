@@ -316,18 +316,17 @@ function sendImageMessage(sock, jid, buffer, caption) {
 // SOP consultative selling (7 pesan): teks -> awal.jpeg + keluhan pelanggan ->
 // testi1..4 (tanpa caption) -> akhir.jpeg + deskripsi FIX NUTRI GLOW SERIES.
 // `complaint` = teks keluhan asli pelanggan; kosong (foto/pesan suara) -> awal.jpeg tanpa caption.
+// SOP consultative selling (3 pesan):
+// 1. Teks Sapaan -> 2. awal.jpeg (caption keluhan + produk) -> 3. akhir.jpeg (caption BPOM/Halal)
 async function sendConsultativeSteps(
   sock,
   jid,
   sleepFn = sleep,
   complaint = "",
 ) {
-  // Validasi SEMUA asset dulu agar tidak terkirim setengah-setengah / format salah
-  const paths = [
-    priceFlow.IMAGE_AWAL_PATH,
-    ...priceFlow.IMAGE_TESTI_PATHS,
-    priceFlow.IMAGE_AKHIR_PATH,
-  ];
+  // Validasi asset dari priceFlow.js
+  const paths = [priceFlow.IMAGE_PRODUCT_PATH, priceFlow.IMAGE_TESTI_PATH];
+
   const buffers = paths.map(readAsset);
   const missing = paths.filter((_, i) => !buffers[i]);
   if (missing.length) {
@@ -335,30 +334,37 @@ async function sendConsultativeSteps(
       `Alur solusi dibatalkan, asset tidak ditemukan: ${missing.join(", ")}`,
     );
   }
-  const [awal, testi1, testi2, testi3, testi4, akhir] = buffers;
+  const [awalBuf, akhirBuf] = buffers;
 
-  if (priceFlow.STEP_AKHIR_CAPTION.length > CAPTION_LIMIT) {
-    throw new Error(
-      `Caption akhir ${priceFlow.STEP_AKHIR_CAPTION.length} karakter, melebihi batas ${CAPTION_LIMIT}.`,
-    );
-  }
-  let awalCaption = String(complaint || "").trim();
+  // Siapkan caption gambar pertama (gabungan keluhan pelanggan dan deskripsi produk)
+  let userComplaint = String(complaint || "").trim();
+  let awalCaption = userComplaint
+    ? `Keluhan Kakak:\n"${userComplaint}"\n\n${priceFlow.STEP2_PRODUCT_CAPTION}`
+    : priceFlow.STEP2_PRODUCT_CAPTION;
+
   if (awalCaption.length > CAPTION_LIMIT) {
     console.log(
-      `⚠️  Keluhan ${awalCaption.length} karakter, dipotong ke ${CAPTION_LIMIT} (batas caption WhatsApp).`,
+      `⚠️ Caption awal ${awalCaption.length} karakter, dipotong ke ${CAPTION_LIMIT} (batas WhatsApp).`,
     );
     awalCaption = awalCaption.slice(0, CAPTION_LIMIT);
   }
 
+  let akhirCaption = priceFlow.STEP3_TESTI_CAPTION;
+  if (akhirCaption.length > CAPTION_LIMIT) {
+    akhirCaption = akhirCaption.slice(0, CAPTION_LIMIT);
+  }
+
+  // --- Mulai Kirim SOP ---
+  // Langkah 1: Sapaan
   await sock.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
   await sleepFn(priceFlow.STEP1_DELAY_MS);
-  await sendImageMessage(sock, jid, awal, awalCaption);
-  for (const buf of [testi1, testi2, testi3, testi4]) {
-    await sleepFn(priceFlow.STEP2_DELAY_MS);
-    await sendImageMessage(sock, jid, buf);
-  }
+
+  // Langkah 2: Gambar Awal + Caption Produk
+  await sendImageMessage(sock, jid, awalBuf, awalCaption);
   await sleepFn(priceFlow.STEP2_DELAY_MS);
-  await sendImageMessage(sock, jid, akhir, priceFlow.STEP_AKHIR_CAPTION);
+
+  // Langkah 3: Gambar Akhir + Caption Testi/BPOM
+  await sendImageMessage(sock, jid, akhirBuf, akhirCaption);
 }
 
 // Jeda "mengetik..." lalu kirim 7 pesan alur solusi. Jika gagal, hanya dicatat di log
