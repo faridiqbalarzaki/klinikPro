@@ -13,10 +13,13 @@ const UPLOAD_DIR =
   process.env.UPLOAD_DIR || path.join(__dirname, "..", "uploads");
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB per gambar
 const MAX_IMAGES = 5; // maksimal gambar per template/batch
+const MAX_AUDIO = 1; // maksimal 1 voice note per template/batch
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
   ".png": "image/png",
   ".webp": "image/webp",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
 };
 
 // Pastikan folder utama uploads tersedia
@@ -27,7 +30,8 @@ const INBOX_DIR = path.join(UPLOAD_DIR, "inbox");
 const MAX_INBOX_BYTES = 10 * 1024 * 1024; // foto pelanggan maks 10 MB
 fs.mkdirSync(INBOX_DIR, { recursive: true });
 
-const SAFE_NAME = /^[a-f0-9]{32}\.(jpg|png|webp)$/;
+const SAFE_NAME = /^[a-f0-9]{32}\.(jpg|png|webp|mp3|ogg)$/;
+const AUDIO_NAME = /\.(mp3|ogg)$/i;
 
 const httpError = (status, message) => {
   const err = new Error(message);
@@ -53,34 +57,51 @@ function detectExt(buf) {
   return null;
 }
 
+// Deteksi audio dari isi file (magic bytes). detectExt untuk gambar sengaja tidak diubah,
+// karena saveInboxBuffer juga memakainya dan foto pelanggan harus tetap hanya gambar.
+function detectAudioExt(buf) {
+  if (buf.length < 12) return null;
+  if (buf.subarray(0, 4).toString("latin1") === "OggS") return ".ogg";
+  if (buf.subarray(0, 3).toString("latin1") === "ID3") return ".mp3";
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return ".mp3"; // frame sync MP3
+  return null;
+}
+
+// Item audio: data URL baru ("data:audio/...") atau nama file lama (.mp3/.ogg)
+const isAudioItem = (v) =>
+  typeof v === "string" && (v.startsWith("data:audio/") || AUDIO_NAME.test(v));
+
 const resolveName = (name) =>
   typeof name === "string" && SAFE_NAME.test(name)
     ? path.join(UPLOAD_DIR, name)
     : null;
 
-// "data:image/png;base64,...." -> simpan ke disk, kembalikan nama file
+// "data:image/png;base64,...." atau "data:audio/mpeg;base64,...." -> simpan ke disk, kembalikan nama file
 function saveDataUrl(dataUrl) {
   const s = String(dataUrl ?? "");
   const comma = s.indexOf(",");
   const head = comma > 0 ? s.slice(0, comma) : "";
-  if (!/^data:image\/(jpeg|png|webp);base64$/.test(head)) {
+  if (!/^data:(image\/(jpeg|png|webp)|audio\/(mpeg|ogg));base64$/.test(head)) {
     throw httpError(
       400,
-      "Format gambar tidak valid. Gunakan JPG, PNG, atau WEBP.",
+      "Format file tidak valid. Gunakan JPG, PNG, WEBP, MP3, atau OGG.",
     );
   }
   const buf = Buffer.from(s.slice(comma + 1), "base64");
   if (buf.length === 0) {
-    throw httpError(400, "Data gambar kosong atau rusak.");
+    throw httpError(400, "Data file kosong atau rusak.");
   }
   if (buf.length > MAX_IMAGE_BYTES) {
-    throw httpError(400, "Ukuran gambar maksimal 5 MB.");
+    throw httpError(400, "Ukuran file maksimal 5 MB.");
   }
-  const ext = detectExt(buf);
+  const isAudio = head.startsWith("data:audio/");
+  const ext = isAudio ? detectAudioExt(buf) : detectExt(buf); // cek isi, bukan klaim browser
   if (!ext) {
     throw httpError(
       400,
-      "Isi file bukan gambar JPG, PNG, atau WEBP yang valid.",
+      isAudio
+        ? "Isi file bukan audio MP3 atau OGG yang valid."
+        : "Isi file bukan gambar JPG, PNG, atau WEBP yang valid.",
     );
   }
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -123,8 +144,11 @@ const removeImages = (names) => (names || []).forEach(removeImage);
 
 // Simpan banyak data URL sekaligus. Jika salah satu gagal, yang sudah tertulis dibatalkan.
 function saveDataUrls(list) {
-  if (list.length > MAX_IMAGES) {
-    throw httpError(400, `Maksimal ${MAX_IMAGES} gambar per template.`);
+  if (list.length > MAX_IMAGES + MAX_AUDIO) {
+    throw httpError(
+      400,
+      `Maksimal ${MAX_IMAGES} gambar + ${MAX_AUDIO} audio per template.`,
+    );
   }
   const saved = [];
   try {
@@ -156,8 +180,13 @@ function toImageList(images, legacyImage) {
   if (raw.some((x) => typeof x !== "string" || !x)) {
     throw httpError(400, "Format gambar tidak valid.");
   }
-  if (raw.length > MAX_IMAGES) {
+  // Gambar dan audio dihitung terpisah
+  const audioCount = raw.filter(isAudioItem).length;
+  if (raw.length - audioCount > MAX_IMAGES) {
     throw httpError(400, `Maksimal ${MAX_IMAGES} gambar per pesan.`);
+  }
+  if (audioCount > MAX_AUDIO) {
+    throw httpError(400, "Maksimal 1 file audio (voice note) per pesan.");
   }
   return raw;
 }
@@ -196,6 +225,8 @@ module.exports = {
   INBOX_DIR, // Tambahan export
   MAX_IMAGE_BYTES,
   MAX_IMAGES,
+  MAX_AUDIO,
+  isAudioItem,
   httpError,
   isDataUrl,
   saveDataUrl,

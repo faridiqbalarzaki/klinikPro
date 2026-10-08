@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   useState,
   useMemo,
   useEffect,
@@ -7,6 +8,14 @@ import React, {
   createContext,
   useContext,
 } from "react";
+import {
+  MEDIA_ACCEPT,
+  MAX_AUDIO,
+  isAudioSrc,
+  countMedia,
+  prepareMedia,
+} from "./mediaUtils";
+// dan tambahkan `Mic` ke import dari "lucide-react"
 import {
   Send,
   Calendar,
@@ -35,6 +44,7 @@ import {
   QrCode,
   LogOut,
   Tags,
+  Mic,
 } from "lucide-react";
 import "./design.css";
 
@@ -581,6 +591,8 @@ const Toast = () => {
 
 // Pratinjau gelembung WhatsApp (sampai 5 gambar; beberapa bubble tampil terpisah)
 const WaPreview = ({ text, images = [], className = "" }) => {
+  const pics = images.filter((x) => !isAudioSrc(x));
+  const voice = images.find(isAudioSrc);
   const time = new Date().toLocaleTimeString("id-ID", {
     hour: "2-digit",
     minute: "2-digit",
@@ -599,42 +611,52 @@ const WaPreview = ({ text, images = [], className = "" }) => {
       />
       <div className="relative z-10 flex flex-col items-start gap-1.5">
         {bubbles.map((bubble, bi) => (
-          <div
-            key={bi}
-            className="wa-bubble animate-fade-in w-fit max-w-[85%] bg-white rounded-lg p-1.5 shadow-sm border border-gray-100 flex flex-col"
-          >
-            {bi === 0 && images.length > 0 && (
-              <div
-                data-testid="wa-preview-images"
-                className={`mb-1 rounded-md overflow-hidden grid gap-0.5 ${images.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}
-              >
-                {images.map((img, i) => (
-                  <div
-                    key={`${i}-${img.slice(-24)}`}
-                    className={`bg-gray-100 overflow-hidden ${images.length % 2 === 1 && i === 0 && images.length > 1 ? "col-span-2" : ""}`}
-                  >
-                    <img
-                      src={imageSrc(img)}
-                      alt={`Media ${i + 1}`}
-                      className={`w-full object-cover ${images.length === 1 ? "max-h-48" : "h-24"}`}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="px-1.5 pb-1 pt-1">
-              <p className="text-[14px] leading-relaxed text-[#111b21] whitespace-pre-wrap break-words">
-                {bubble || (
-                  <span className="text-gray-400 italic">
-                    Ketik pesan untuk melihat pratinjau...
-                  </span>
-                )}
-              </p>
-              <div className="text-[10px] text-gray-400 text-right mt-1 font-medium">
-                {time}
+          <Fragment key={bi}>
+            <div className="wa-bubble animate-fade-in w-fit max-w-[85%] bg-white rounded-lg p-1.5 shadow-sm border border-gray-100 flex flex-col">
+              {bi === 0 && pics.length > 0 && (
+                <div
+                  data-testid="wa-preview-images"
+                  className={`mb-1 rounded-md overflow-hidden grid gap-0.5 ${pics.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}
+                >
+                  {pics.map((img, i) => (
+                    <div
+                      key={`${i}-${img.slice(-24)}`}
+                      className={`bg-gray-100 overflow-hidden ${pics.length % 2 === 1 && i === 0 && pics.length > 1 ? "col-span-2" : ""}`}
+                    >
+                      <img
+                        src={imageSrc(img)}
+                        alt={`Media ${i + 1}`}
+                        className={`w-full object-cover ${pics.length === 1 ? "max-h-48" : "h-24"}`}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="px-1.5 pb-1 pt-1">
+                <p className="text-[14px] leading-relaxed text-[#111b21] whitespace-pre-wrap break-words">
+                  {bubble || (
+                    <span className="text-gray-400 italic">
+                      Ketik pesan untuk melihat pratinjau...
+                    </span>
+                  )}
+                </p>
+                <div className="text-[10px] text-gray-400 text-right mt-1 font-medium">
+                  {time}
+                </div>
               </div>
             </div>
-          </div>
+            {bi === 0 && voice && (
+              <div className="wa-bubble w-fit max-w-[85%] bg-white rounded-lg p-2 shadow-sm border border-gray-100 flex items-center gap-2">
+                <Mic className="w-4 h-4 text-pink-500 shrink-0" />
+                <audio
+                  controls
+                  preload="metadata"
+                  src={imageSrc(voice)}
+                  className="h-9 w-48"
+                />
+              </div>
+            )}
+          </Fragment>
         ))}
       </div>
     </div>
@@ -1905,44 +1927,11 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
     };
   }, [onClose, saving]);
 
-  const addFiles = (fileList) => {
-    const files = Array.from(fileList || []);
-    const slots = MAX_IMAGES - images.length;
-    if (files.length === 0) return;
-    if (slots <= 0) {
-      notify("error", `Maksimal ${MAX_IMAGES} gambar per template.`);
-      return;
-    }
-    const accepted = [];
-    for (const file of files.slice(0, slots)) {
-      if (!IMAGE_TYPES.includes(file.type)) {
-        notify(
-          "error",
-          `"${file.name}" dilewati: gunakan JPG, PNG, atau WEBP.`,
-        );
-        continue;
-      }
-      if (file.size > MAX_IMAGE_BYTES) {
-        notify("error", `"${file.name}" dilewati: ukuran maksimal 5 MB.`);
-        continue;
-      }
-      accepted.push(file);
-    }
-    Promise.all(
-      accepted.map(
-        (file) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(String(e.target.result));
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(file);
-          }),
-      ),
-    ).then((urls) =>
-      setImages((prev) =>
-        [...prev, ...urls.filter(Boolean)].slice(0, MAX_IMAGES),
-      ),
-    );
+  const { images: imageCount, audio: audioCount } = countMedia(images);
+
+  const addFiles = async (fileList) => {
+    const urls = await prepareMedia(fileList, images, notify, MAX_IMAGES);
+    if (urls.length) setImages((prev) => [...prev, ...urls]);
   };
 
   const handleSave = async () => {
@@ -2071,22 +2060,32 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
 
           <div>
             <label className={labelCls}>
-              Gambar ({images.length}/{MAX_IMAGES})
+              Media ({imageCount}/{MAX_IMAGES} gambar
+              {audioCount > 0 ? " + 1 voice note" : ""})
             </label>
             <div className="flex flex-wrap gap-2">
               {images.map((img, i) => (
                 <div
                   key={`${img.slice(0, 40)}-${i}`}
-                  className="relative w-20 h-20"
+                  className={`relative ${isAudioSrc(img) ? "w-full" : "w-20 h-20"}`}
                 >
-                  <img
-                    src={imageSrc(img)}
-                    alt={`Gambar ${i + 1}`}
-                    className="w-full h-full rounded-xl object-cover border border-gray-200 bg-gray-50"
-                  />
+                  {isAudioSrc(img) ? (
+                    <audio
+                      controls
+                      preload="metadata"
+                      src={imageSrc(img)}
+                      className="w-full h-10"
+                    />
+                  ) : (
+                    <img
+                      src={imageSrc(img)}
+                      alt={`Gambar ${i + 1}`}
+                      className="w-full h-full rounded-xl object-cover border border-gray-200 bg-gray-50"
+                    />
+                  )}
                   <button
                     type="button"
-                    aria-label={`Hapus gambar ${i + 1}`}
+                    aria-label={`Hapus media ${i + 1}`}
                     onClick={() =>
                       setImages((p) => p.filter((_, j) => j !== i))
                     }
@@ -2096,14 +2095,14 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
                   </button>
                 </div>
               ))}
-              {images.length < MAX_IMAGES && (
+              {(imageCount < MAX_IMAGES || audioCount < MAX_AUDIO) && (
                 <label className="w-20 h-20 rounded-xl border-2 border-dashed border-gray-300 hover:border-pink-400 text-gray-400 hover:text-pink-500 flex items-center justify-center cursor-pointer transition-colors">
                   <Plus className="w-6 h-6" />
                   <input
                     type="file"
                     multiple
                     hidden
-                    accept={IMAGE_TYPES.join(",")}
+                    accept={MEDIA_ACCEPT}
                     onChange={(e) => {
                       addFiles(e.target.files);
                       e.target.value = "";
@@ -2192,14 +2191,23 @@ const TemplateCard = ({ t, onDelete, onSetGroup, onEdit }) => {
       </div>
       {t.images?.length > 0 && (
         <div className="flex gap-1.5">
-          {t.images.map((img, i) => (
-            <img
-              key={`${img}-${i}`}
-              src={imageSrc(img)}
-              alt={`${t.name} ${i + 1}`}
-              className="w-12 h-12 rounded-lg object-cover border border-gray-100"
-            />
-          ))}
+          {t.images.map((img, i) =>
+            isAudioSrc(img) ? (
+              <span
+                key={`${img}-${i}`}
+                className="flex items-center gap-1 h-12 px-3 rounded-lg bg-pink-50 text-pink-600 text-xs font-semibold border border-pink-100"
+              >
+                <Mic className="w-3.5 h-3.5" /> Voice Note
+              </span>
+            ) : (
+              <img
+                key={`${img}-${i}`}
+                src={imageSrc(img)}
+                alt={`${t.name} ${i + 1}`}
+                className="w-12 h-12 rounded-lg object-cover border border-gray-100"
+              />
+            ),
+          )}
         </div>
       )}
       <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-100 whitespace-pre-wrap line-clamp-3">
@@ -2233,6 +2241,7 @@ const TemplatesTab = () => {
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [images, setImages] = useState([]); // Daftar Base64 (maks MAX_IMAGES)
+  const { images: imageCount, audio: audioCount } = countMedia(images);
   const [tplType, setTplType] = useState("manual_fu"); // 'manual_fu' | 'auto_reply'
   const [tplGroup, setTplGroup] = useState("followup"); // followup | rencana | pengiriman
   const [partTexts, setPartTexts] = useState(["", ""]); // isi tiap bubble (Rencana / Pengiriman)
@@ -2256,52 +2265,9 @@ const TemplatesTab = () => {
     refreshTemplates();
   }, [refreshTemplates]);
 
-  const processFiles = (fileList) => {
-    const files = Array.from(fileList || []);
-    if (files.length === 0) return;
-
-    const slots = MAX_IMAGES - images.length;
-    if (slots <= 0) {
-      notify("error", `Maksimal ${MAX_IMAGES} gambar per template.`);
-      return;
-    }
-    if (files.length > slots) {
-      notify(
-        "error",
-        `Hanya ${slots} gambar lagi yang bisa ditambahkan (maksimal ${MAX_IMAGES}).`,
-      );
-    }
-
-    const accepted = [];
-    for (const file of files.slice(0, slots)) {
-      if (!IMAGE_TYPES.includes(file.type)) {
-        notify(
-          "error",
-          `"${file.name}" dilewati: gunakan JPG, PNG, atau WEBP.`,
-        );
-        continue;
-      }
-      if (file.size > MAX_IMAGE_BYTES) {
-        notify("error", `"${file.name}" dilewati: ukuran maksimal 5 MB.`);
-        continue;
-      }
-      accepted.push(file);
-    }
-
-    Promise.all(
-      accepted.map(
-        (file) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(String(e.target.result));
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(file);
-          }),
-      ),
-    ).then((urls) => {
-      const ok = urls.filter(Boolean);
-      setImages((prev) => [...prev, ...ok].slice(0, MAX_IMAGES));
-    });
+  const processFiles = async (fileList) => {
+    const urls = await prepareMedia(fileList, images, notify, MAX_IMAGES);
+    if (urls.length) setImages((prev) => [...prev, ...urls]);
   };
 
   const removeImageAt = (index) =>
@@ -2541,11 +2507,12 @@ const TemplatesTab = () => {
                 <span>
                   Media (Opsional){" "}
                   <span className="text-pink-500 font-semibold">
-                    {images.length}/{MAX_IMAGES}
+                    {imageCount}/{MAX_IMAGES}
+                    {audioCount > 0 && " + 1 voice note"}
                   </span>
                 </span>
                 <span className="text-gray-400 text-xs font-normal">
-                  JPG, PNG, WEBP (Maks 5MB per gambar)
+                  Gambar JPG/PNG/WEBP · Audio MP3/OGG (maks 5MB per file)
                 </span>
               </label>
 
@@ -2554,33 +2521,58 @@ const TemplatesTab = () => {
                   data-testid="template-image-grid"
                   className="grid grid-cols-3 sm:grid-cols-5 gap-2 mb-3"
                 >
-                  {images.map((img, i) => (
-                    <div
-                      key={`${i}-${img.slice(-24)}`}
-                      className="relative aspect-square rounded-xl overflow-hidden border border-gray-200 bg-gray-50"
-                    >
-                      <img
-                        src={img}
-                        alt={`Gambar ${i + 1}`}
-                        className="w-full h-full object-cover"
-                      />
-                      <span className="absolute bottom-1 left-1 bg-black/55 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">
-                        {i + 1}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeImageAt(i)}
-                        aria-label={`Hapus gambar ${i + 1}`}
-                        className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-sm transition-colors"
+                  {images.map((img, i) =>
+                    isAudioSrc(img) ? (
+                      <div
+                        key={`${i}-${img.slice(-24)}`}
+                        className="col-span-3 sm:col-span-5 relative flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 p-2 pr-10"
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
+                        <span className="flex items-center gap-1 text-[11px] font-semibold text-pink-600 bg-pink-50 px-2 py-1 rounded-lg shrink-0">
+                          <Mic className="w-3 h-3" /> Voice Note
+                        </span>
+                        <audio
+                          controls
+                          preload="metadata"
+                          src={imageSrc(img)}
+                          className="w-full h-10"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeImageAt(i)}
+                          aria-label="Hapus voice note"
+                          className="absolute top-1/2 -translate-y-1/2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-sm"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div
+                        key={`${i}-${img.slice(-24)}`}
+                        className="relative aspect-square rounded-xl overflow-hidden border border-gray-200 bg-gray-50"
+                      >
+                        <img
+                          src={imageSrc(img)}
+                          alt={`Gambar ${i + 1}`}
+                          className="w-full h-full object-cover"
+                        />
+                        <span className="absolute bottom-1 left-1 bg-black/55 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">
+                          {i + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeImageAt(i)}
+                          aria-label={`Hapus gambar ${i + 1}`}
+                          className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-sm transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ),
+                  )}
                 </div>
               )}
 
-              {images.length < MAX_IMAGES && (
+              {(imageCount < MAX_IMAGES || audioCount < MAX_AUDIO) && (
                 <div
                   onDragOver={(e) => {
                     e.preventDefault();
@@ -2601,7 +2593,7 @@ const TemplatesTab = () => {
                   <input
                     type="file"
                     multiple
-                    accept="image/jpeg, image/png, image/webp"
+                    accept={MEDIA_ACCEPT}
                     data-testid="template-image-input"
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                     onChange={(e) => {
@@ -2617,7 +2609,7 @@ const TemplatesTab = () => {
                     <p className="text-sm font-semibold text-pink-500">
                       {images.length
                         ? "Tambah gambar lagi"
-                        : "Klik untuk unggah gambar"}
+                        : "Klik untuk unggah gambar / audio"}
                     </p>
                     <p className="text-xs text-gray-400 mt-1">
                       bisa pilih beberapa sekaligus, atau drag & drop

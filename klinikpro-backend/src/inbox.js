@@ -7,6 +7,7 @@
 // agar mudah diuji tanpa WhatsApp/database.
 const db = require("./db");
 const media = require("./media"); // FITUR BARU: Import media untuk menyimpan gambar pelanggan
+const priceFlow = require("./priceFlow"); // FITUR BARU: alur konsultatif harga
 
 // FITUR BARU: Deteksi jika pesan berisi gambar (baik langsung maupun diforward/quoted)
 const isImageMessage = (message) => Boolean(unwrap(message)?.imageMessage);
@@ -279,6 +280,35 @@ function remember(id) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Jeda + indikator "mengetik..." sebelum bot membalas (pola sama dengan auto-reply)
+async function humanDelay(sock, jid, deps) {
+  const total =
+    AUTO_REPLY_DELAY_MIN_MS +
+    Math.floor(
+      Math.random() * (AUTO_REPLY_DELAY_MAX_MS - AUTO_REPLY_DELAY_MIN_MS + 1),
+    );
+  await deps.sleep(Math.max(0, total - TYPING_MS));
+  try {
+    await sock.sendPresenceUpdate?.("composing", jid);
+  } catch (_) {}
+  await deps.sleep(Math.min(TYPING_MS, total));
+}
+
+// Template harga: PRICE_TEMPLATE_ID (opsional) -> atau template auto_reply yang
+// punya keyword harga/biaya/dst. Tidak ketemu -> null (pakai teks cadangan).
+function findPriceTemplate(tpls) {
+  const id = Number(process.env.PRICE_TEMPLATE_ID);
+  if (id) {
+    const t = tpls.find((x) => x.id === id);
+    if (t) return t;
+  }
+  for (const kw of priceFlow.PRICE_KEYWORDS) {
+    const t = matchAutoReply(kw, tpls);
+    if (t) return t;
+  }
+  return null;
+}
+
 async function processMessage(sock, msg, deps) {
   const { key } = msg;
 
@@ -309,8 +339,71 @@ async function processMessage(sock, msg, deps) {
     `lolos filter -> nomor=${phone} teks="${content.text.slice(0, 80)}" lampiran=${content.hasAttachment}`,
   );
 
+  // --- 0. Alur konsultatif harga: tahan harga, tanya keluhan dulu ---
+  const { STATES } = priceFlow;
+  const normText = normalize(content.text);
+  const priceState = priceFlow.getState(jid);
+  let priceComplaint = false; // true = pesan ini adalah keluhan yang dijawab dengan harga
+
+  if (
+    priceState === STATES.WAITING_FOR_COMPLAINT &&
+    (content.text || content.label)
+  ) {
+    // Pelanggan mengulang "berapa harganya?" tanpa cerita keluhan -> tanyakan lagi, jangan reset
+    const justAskingAgain =
+      content.text &&
+      !content.hasAttachment &&
+      normText.split(" ").length <= 4 &&
+      anyPhrase(normText, priceFlow.PRICE_KEYWORDS);
+    if (justAskingAgain) {
+      priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT); // perpanjang TTL
+      await humanDelay(sock, jid, deps);
+      await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
+      return { action: "price_gate_repeat" };
+    }
+
+    // Keluhan diterima (teks, foto, atau pesan suara) -> reset ke IDLE, kirim estimasi harga
+    priceFlow.setState(jid, STATES.IDLE);
+    const tpls = (await deps.query(AUTO_REPLY_SQL)).rows;
+    const tpl = findPriceTemplate(tpls);
+    const reply = renderTemplate(
+      tpl?.content ?? priceFlow.FALLBACK_PRICE_TEXT,
+      {
+        nama: msg.pushName,
+        treatment: "",
+        tanggal: new Date().toLocaleDateString("id-ID", {
+          dateStyle: "medium",
+          timeZone: deps.tz,
+        }),
+      },
+    );
+    await humanDelay(sock, jid, deps);
+    const mode = await deps.send(jid, reply, tpl?.images || []);
+    console.log(
+      `💬 Estimasi harga dikirim ke ${phone} (${mode || "teks"}) setelah keluhan`,
+    );
+    priceComplaint = true; // lanjut ke bawah: keluhan disimpan sebagai tiket untuk CS
+  } else if (
+    priceState === STATES.IDLE &&
+    content.text &&
+    anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
+  ) {
+    // Ada keyword harga -> tahan info harga, tanya keluhan
+    priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
+    try {
+      await humanDelay(sock, jid, deps);
+      await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
+    } catch (err) {
+      priceFlow.setState(jid, STATES.IDLE); // jangan terjebak jika kirim gagal
+      throw err;
+    }
+    console.log(`💬 Pertanyaan harga dari ${phone} ditahan, menunggu keluhan`);
+    return { action: "price_gate" };
+  }
+
   // --- 1. Auto-reply (jika cocok: balas, lalu berhenti — tidak ada tiket) ---
-  if (content.text) {
+  // Dilewati jika pesan ini sudah dijawab oleh alur harga
+  if (content.text && !priceComplaint) {
     const tpls = (await deps.query(AUTO_REPLY_SQL)).rows;
     const hit = matchAutoReply(content.text, tpls);
     if (hit) {
@@ -359,7 +452,8 @@ async function processMessage(sock, msg, deps) {
   }
 
   // --- 2. Kategori + 3. Simpan tiket + 4. Catat pesan (& foto) ---
-  const category = categorize(content.text);
+  // Keluhan yang dijawab harga otomatis masuk kategori "Penawaran"
+  const category = priceComplaint ? "Penawaran" : categorize(content.text);
   dbg(`kategori terdeteksi: ${category}`);
   const lastMessage = (content.text || content.label || "").slice(0, 1000);
 

@@ -5,6 +5,7 @@ require("dotenv").config({
 require("dotenv").config();
 const db = require("./db");
 const media = require("./media");
+const audio = require("./audio");
 const inbox = require("./inbox");
 // Fitur Label WA bersifat tambahan: jika modulnya bermasalah, WhatsApp tetap harus tersambung.
 let labels = null;
@@ -420,21 +421,25 @@ function splitBubbles(text) {
   return parts.length ? parts : [String(text ?? "")];
 }
 
-// Kirim pesan: bubble 1 (+ gambar bila ada) dulu, lalu bubble berikutnya satu per satu.
+// Kirim pesan: bubble 1 (+ gambar bila ada) dulu, lalu voice note (bila ada),
+// lalu bubble berikutnya satu per satu. Voice note tidak bisa punya caption.
 // Jika gagal di tengah jalan, error diberi tanda "partial" agar item tidak dikirim ulang.
 async function deliver(jid, text, imageNames) {
   if (!sock) throw new Error("Koneksi terputus saat menunggu jeda auto-reply.");
   const [first, ...rest] = splitBubbles(text);
 
-  const files = [];
+  const files = []; // gambar
+  let voice = null; // voice note (maks 1)
   for (const name of imageNames || []) {
-    const img = media.readImage(name);
-    if (img) files.push(img);
-    else {
+    const f = media.readImage(name);
+    if (!f) {
       console.log(
-        `⚠️  File gambar "${name}" tidak ditemukan di folder uploads, dilewati.`,
+        `⚠️  File media "${name}" tidak ditemukan di folder uploads, dilewati.`,
       );
+      continue;
     }
+    if (f.mimetype.startsWith("audio/")) voice = voice || { name, file: f };
+    else files.push(f);
   }
 
   const steps = [];
@@ -454,6 +459,19 @@ async function deliver(jid, text, imageNames) {
     });
     if (!captionFits) steps.push(() => sock.sendMessage(jid, { text: first }));
   }
+
+  // Voice Note (PTT): dikirim setelah bubble/gambar pertama
+  if (voice) {
+    steps.push(async () => {
+      try {
+        await sock.sendPresenceUpdate("recording", jid); // indikator "merekam audio..."
+        await sleep(1500);
+      } catch (_) {}
+      const content = await audio.toVoiceNote(voice.name, voice.file);
+      return sock.sendMessage(jid, content);
+    });
+  }
+
   for (const bubble of rest) {
     steps.push(() => sock.sendMessage(jid, { text: bubble }));
   }
@@ -477,12 +495,15 @@ async function deliver(jid, text, imageNames) {
     throw err;
   }
 
-  const mode =
+  const modeParts = [
     files.length > 1
       ? `${files.length} gambar`
       : files.length === 1
         ? "gambar"
-        : "teks";
+        : "teks",
+  ];
+  if (voice) modeParts.push("voice note");
+  const mode = modeParts.join(" + ");
   return rest.length ? `${mode}, ${rest.length + 1} bubble` : mode;
 }
 
