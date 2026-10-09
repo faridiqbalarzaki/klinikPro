@@ -1934,16 +1934,17 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
     if (urls.length) setImages((prev) => [...prev, ...urls]);
   };
 
-  // UBAH FUNGSI handleSave:
-  // UBAH FUNGSI handleSave PADA EDIT MODAL:
   const handleSave = async () => {
+    // Ambil isi teks jika ada
     const finalContent = usesParts
       ? partTexts
+          .slice(0, group.parts.length)
           .map((t) => t.trim())
           .filter(Boolean)
           .join(`\n${BUBBLE_SEP}\n`)
       : content.trim();
 
+    const hasContent = Boolean(finalContent && finalContent.trim());
     const hasMedia = images.length > 0;
 
     if (!name.trim()) {
@@ -1951,31 +1952,58 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
       return;
     }
 
-    if (!finalContent && !hasMedia) {
-      notify("error", "Template harus berisi teks atau Voice Note.");
+    // Jika TIDAK ADA teks DAN TIDAK ADA media/voice note, baru beri error
+    if (!hasContent && !hasMedia) {
+      notify("error", "Isi pesan teks atau unggah Voice Note terlebih dahulu.");
       return;
     }
 
-    setSaving(true);
+    // HANYA validasi bubble chat jika pengguna memang mengisi teks pada multi-bubble
+    if (
+      usesParts &&
+      hasContent &&
+      partTexts.slice(0, group.parts.length).some((t) => !t.trim())
+    ) {
+      notify(
+        "error",
+        "Isi kedua bubble chat terlebih dulu jika ingin menggunakan 2 pesan teks.",
+      );
+      return;
+    }
+
+    if (tplType === "auto_reply" && !keywords.trim()) {
+      notify("error", "Template auto-reply wajib punya minimal 1 keyword.");
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
       const payload = {
         name: name.trim(),
-        content: finalContent || "",
-        time_slot: template.time_slot || "",
-        images,
+        content: finalContent || "", // Berikan string kosong jika hanya voice note
+        type: tplType,
       };
-      if (isAuto) payload.keywords = keywords;
-      const saved = await api(`/api/templates/${template.id}`, {
-        method: "PUT",
+      if (tplType === "auto_reply") payload.keywords = keywords;
+      if (tplType === "manual_fu") payload.time_slot = tplGroup;
+      if (images.length > 0) payload.images = images;
+
+      const newTemplate = await api("/api/templates", {
+        method: "POST",
         body: JSON.stringify(payload),
       });
-      onSaved(saved);
-      notify("success", "Template berhasil diperbarui!");
-      onClose();
+      setTemplates([newTemplate, ...templates]);
+      setName("");
+      setContent("");
+      setImages([]);
+      setTplType("manual_fu");
+      setTplGroup("followup");
+      setPartTexts(["", ""]);
+      setKeywords("");
+      notify("success", "Template Voice Note berhasil disimpan!");
     } catch (err) {
-      notify("error", `Gagal menyimpan perubahan: ${err.message}`);
+      notify("error", `Gagal menyimpan template: ${err.message}`);
     } finally {
-      setSaving(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -2284,16 +2312,22 @@ const TemplatesTab = () => {
       return;
     }
 
+    // Jika TIDAK ADA teks DAN TIDAK ADA media/voice note
     if (!hasContent && !hasMedia) {
       notify("error", "Isi pesan teks atau unggah Voice Note terlebih dahulu.");
       return;
     }
 
+    // HANYA cek kelengkapan bubble jika pengguna memang mengisi TEKS di multi-bubble
     if (
       usesParts &&
+      hasContent &&
       partTexts.slice(0, group.parts.length).some((t) => !t.trim())
     ) {
-      notify("error", "Isi kedua bubble chat terlebih dulu.");
+      notify(
+        "error",
+        "Isi kedua bubble chat terlebih dulu jika ingin mengirim 2 pesan teks.",
+      );
       return;
     }
 
@@ -2306,7 +2340,7 @@ const TemplatesTab = () => {
     try {
       const payload = {
         name: name.trim(),
-        content: finalContent || "", // Jika tidak ada teks, kirim string kosong
+        content: finalContent || "", // Berikan string kosong jika hanya voice note
         type: tplType,
       };
       if (tplType === "auto_reply") payload.keywords = keywords;
