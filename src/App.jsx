@@ -1934,6 +1934,8 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
     if (urls.length) setImages((prev) => [...prev, ...urls]);
   };
 
+  // UBAH FUNGSI handleSave:
+  // UBAH FUNGSI handleSave PADA EDIT MODAL:
   const handleSave = async () => {
     const finalContent = usesParts
       ? partTexts
@@ -1942,16 +1944,15 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
           .join(`\n${BUBBLE_SEP}\n`)
       : content.trim();
 
-    if (!name.trim() || !finalContent) {
-      notify("error", "Nama dan isi template wajib diisi.");
+    const hasMedia = images.length > 0;
+
+    if (!name.trim()) {
+      notify("error", "Nama template wajib diisi.");
       return;
     }
-    if (usesParts && partTexts.some((t) => !t.trim())) {
-      notify("error", "Isi kedua bubble chat terlebih dulu.");
-      return;
-    }
-    if (isAuto && !keywords.trim()) {
-      notify("error", "Template auto-reply wajib punya minimal 1 keyword.");
+
+    if (!finalContent && !hasMedia) {
+      notify("error", "Template harus berisi teks atau Voice Note.");
       return;
     }
 
@@ -1959,7 +1960,7 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
     try {
       const payload = {
         name: name.trim(),
-        content: finalContent,
+        content: finalContent || "",
         time_slot: template.time_slot || "",
         images,
       };

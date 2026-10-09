@@ -122,7 +122,18 @@ function setState(jid, state) {
   if (state === STATES.IDLE) store.delete(jid);
   else store.set(jid, { state, at: Date.now() });
 }
+const lastConsultedMap = new Map();
+const COOLDOWN_24H_MS = 24 * 60 * 60 * 1000;
 
+function setConsultedNow(jid) {
+  lastConsultedMap.set(jid, Date.now());
+}
+
+function hasConsultedWithin24h(jid) {
+  const lastTime = lastConsultedMap.get(jid);
+  if (!lastTime) return false;
+  return Date.now() - lastTime < COOLDOWN_24H_MS;
+}
 module.exports = {
   STATES,
   PRICE_KEYWORDS,
@@ -150,4 +161,7 @@ module.exports = {
   isComplaint,
   getState,
   setState,
+
+  setConsultedNow,
+  hasConsultedWithin24h,
 };

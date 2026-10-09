@@ -288,10 +288,21 @@ async function humanDelay(sock, jid, deps) {
     Math.floor(
       Math.random() * (AUTO_REPLY_DELAY_MAX_MS - AUTO_REPLY_DELAY_MIN_MS + 1),
     );
-  await deps.sleep(Math.max(0, total - TYPING_MS));
+
+  // 1. Set status online
   try {
-    await sock.sendPresenceUpdate?.("composing", jid);
+    await sock.sendPresenceUpdate("available", jid);
   } catch (_) {}
+
+  // 2. Jeda sebentar sebelum ngetik
+  await deps.sleep(Math.max(0, total - TYPING_MS));
+
+  // 3. Mulai status ngetik (typing)
+  try {
+    await sock.sendPresenceUpdate("composing", jid);
+  } catch (_) {}
+
+  // 4. Tahan status ngetik selama waktu TYPING_MS
   await deps.sleep(Math.min(TYPING_MS, total));
 }
 
@@ -358,11 +369,9 @@ async function sendConsultativeSteps(
     akhirCaption = akhirCaption.slice(0, CAPTION_LIMIT);
   }
 
-  // 3. Eksekusi pengiriman berurutan sesuai jeda
-  // Langkah 1: Sapaan teks
   await sock.sendMessage(jid, { text: priceFlow.STEP1_SOLUSI_TEXT });
 
-  // Jeda 4 detik + efek typing sebelum foto pertama
+  // Jeda 4 detik + indikator typing aktif
   try {
     await sock.sendPresenceUpdate("composing", jid);
   } catch (_) {}
@@ -371,16 +380,22 @@ async function sendConsultativeSteps(
   // Langkah 2: Gambar Awal + Caption Produk
   await sendImageMessage(sock, jid, awalBuf, awalCaption);
 
-  // Jeda 2,5 detik sebelum kirim testi
+  // Jeda 2,5 detik + typing
+  try {
+    await sock.sendPresenceUpdate("composing", jid);
+  } catch (_) {}
   await sleepFn(2500);
 
-  // Langkah Sisipan: 4 Gambar Testi dikirim serentak (jadi 1 album)
+  // Langkah Sisipan: 4 Gambar Testi
   const sendTestiPromises = testiBufs.map((buf) =>
     sendImageMessage(sock, jid, buf),
   );
   await Promise.all(sendTestiPromises);
 
-  // Jeda 2 detik sebelum gambar terakhir
+  // Jeda 2 detik + typing
+  try {
+    await sock.sendPresenceUpdate("composing", jid);
+  } catch (_) {}
   await sleepFn(2000);
 
   // Langkah 3: Gambar Akhir + Caption Closing
@@ -436,13 +451,15 @@ async function processMessage(sock, msg, deps) {
   let priceComplaint = false;
 
   // Jika nomor ini sudah pernah selesai konsultasi, abaikan pertanyaan harga selanjutnya
+  // MENJADI SEPERTI INI:
   if (
-    priceState === STATES.DONE &&
+    priceFlow.hasConsultedWithin24h(jid) &&
     anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
   ) {
     dbg(
-      `Nomor ${phone} sudah pernah masuk alur konsultasi. Pertanyaan harga diabaikan untuk bot.`,
+      `Nomor ${phone} sudah konsultasi dalam 24 jam terakhir. Pertanyaan harga diabaikan untuk bot.`,
     );
+    // Biarkan pesan masuk ke tiket CRM agar dibalas manual oleh CS tanpa gangguan bot
     // Biarkan pesan masuk ke tiket CRM agar dibalas manual oleh CS tanpa gangguan bot
   } else if (
     priceState === STATES.WAITING_FOR_COMPLAINT &&
@@ -461,7 +478,9 @@ async function processMessage(sock, msg, deps) {
     }
 
     // Keluhan diterima -> Kirim SOP 1-3, lalu SET STATE KE 'DONE' agar tidak terulang lagi
-    priceFlow.setState(jid, STATES.DONE);
+    // MENJADI INI:
+    priceFlow.setConsultedNow(jid);
+    priceFlow.setState(jid, STATES.IDLE);
     await replyConsultative(sock, jid, phone, deps, content.text);
     priceComplaint = true;
   } else if (
@@ -486,7 +505,8 @@ async function processMessage(sock, msg, deps) {
     priceFlow.isComplaint(content.text)
   ) {
     // Keluhan langsung tanpa ditanya -> Kirim SOP, lalu set state ke 'DONE'
-    priceFlow.setState(jid, STATES.DONE);
+    priceFlow.setConsultedNow(jid);
+    priceFlow.setState(jid, STATES.IDLE);
     await replyConsultative(sock, jid, phone, deps, content.text);
     priceComplaint = true;
   }
