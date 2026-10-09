@@ -2274,11 +2274,21 @@ const TemplatesTab = () => {
   const removeImageAt = (index) =>
     setImages((prev) => prev.filter((_, i) => i !== index));
 
+  // KODE BARU (BOLEH TANPA TEKS ASAL ADA VOICE NOTE / MEDIA):
   const handleSave = async () => {
-    if (!name.trim() || !finalContent) {
-      notify("error", "Nama dan isi template wajib diisi.");
+    const hasContent = Boolean(finalContent && finalContent.trim());
+    const hasMedia = images.length > 0;
+
+    if (!name.trim()) {
+      notify("error", "Nama template wajib diisi.");
       return;
     }
+
+    if (!hasContent && !hasMedia) {
+      notify("error", "Isi pesan teks atau unggah Voice Note terlebih dahulu.");
+      return;
+    }
+
     if (
       usesParts &&
       partTexts.slice(0, group.parts.length).some((t) => !t.trim())
@@ -2286,6 +2296,7 @@ const TemplatesTab = () => {
       notify("error", "Isi kedua bubble chat terlebih dulu.");
       return;
     }
+
     if (tplType === "auto_reply" && !keywords.trim()) {
       notify("error", "Template auto-reply wajib punya minimal 1 keyword.");
       return;
@@ -2295,7 +2306,7 @@ const TemplatesTab = () => {
     try {
       const payload = {
         name: name.trim(),
-        content: finalContent,
+        content: finalContent || "", // Jika tidak ada teks, kirim string kosong
         type: tplType,
       };
       if (tplType === "auto_reply") payload.keywords = keywords;
@@ -2314,7 +2325,7 @@ const TemplatesTab = () => {
       setTplGroup("followup");
       setPartTexts(["", ""]);
       setKeywords("");
-      notify("success", "Template berhasil disimpan!");
+      notify("success", "Template Voice Note berhasil disimpan!");
     } catch (err) {
       notify("error", `Gagal menyimpan template: ${err.message}`);
     } finally {
