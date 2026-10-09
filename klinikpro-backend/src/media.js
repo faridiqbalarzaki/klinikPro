@@ -77,24 +77,39 @@ const resolveName = (name) =>
     : null;
 
 // "data:image/png;base64,...." atau "data:audio/mpeg;base64,...." -> simpan ke disk, kembalikan nama file
+// Tambahkan konstanta baru untuk batas audio (misal 15 MB) di bagian atas file jika mau:
+// const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
+
 function saveDataUrl(dataUrl) {
   const s = String(dataUrl ?? "");
   const comma = s.indexOf(",");
   const head = comma > 0 ? s.slice(0, comma) : "";
-  if (!/^data:(image\/(jpeg|png|webp)|audio\/(mpeg|ogg));base64$/.test(head)) {
+
+  // FIX 1: Tambahkan mp3 dan x-mpeg ke dalam regex
+  if (
+    !/^data:(image\/(jpeg|png|webp)|audio\/(mpeg|mp3|x-mpeg|ogg));base64$/.test(
+      head,
+    )
+  ) {
     throw httpError(
       400,
       "Format file tidak valid. Gunakan JPG, PNG, WEBP, MP3, atau OGG.",
     );
   }
+
   const buf = Buffer.from(s.slice(comma + 1), "base64");
   if (buf.length === 0) {
     throw httpError(400, "Data file kosong atau rusak.");
   }
-  if (buf.length > MAX_IMAGE_BYTES) {
-    throw httpError(400, "Ukuran file maksimal 5 MB.");
-  }
+
   const isAudio = head.startsWith("data:audio/");
+
+  // FIX 2: Pisahkan batas ukuran (Audio misal dibatasi 15MB, Gambar 5MB)
+  const maxSize = isAudio ? 15 * 1024 * 1024 : MAX_IMAGE_BYTES;
+  if (buf.length > maxSize) {
+    throw httpError(400, `Ukuran file maksimal ${isAudio ? "15 MB" : "5 MB"}.`);
+  }
+
   const ext = isAudio ? detectAudioExt(buf) : detectExt(buf); // cek isi, bukan klaim browser
   if (!ext) {
     throw httpError(
@@ -104,6 +119,7 @@ function saveDataUrl(dataUrl) {
         : "Isi file bukan gambar JPG, PNG, atau WEBP yang valid.",
     );
   }
+
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   const name = crypto.randomBytes(16).toString("hex") + ext;
   fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
