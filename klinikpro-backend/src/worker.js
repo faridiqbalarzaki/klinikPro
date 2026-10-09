@@ -323,7 +323,7 @@ async function openSocket() {
 // ==========================================
 function renderMessage(template, { nama, treatment, tanggal }) {
   // Fungsi pengganti dipakai agar karakter seperti "$&" di nama tidak ditafsirkan
-  return String(template)
+  return String(template ?? "")
     .replace(/{{\s*nama\s*}}/gi, () => nama || "Kak")
     .replace(/{{\s*treatment\s*}}/gi, () => treatment || "Treatment")
     .replace(/{{\s*tanggal\s*}}/gi, () => tanggal);
@@ -585,6 +585,63 @@ async function finalizeBatchIfDone(batchId) {
   );
 }
 
+// ------------------------------------------
+// PEMBERSIHAN SALINAN MEDIA BATCH
+// routes.js menyalin media template ke file baru untuk tiap batch (batch_images).
+// Salinan itu dihapus setelah batch selesai atau dibatalkan, selama tidak ada
+// item yang sedang dikirim (status 'processing').
+// ------------------------------------------
+const FINAL_BATCH_STATUS_SQL = `('Selesai', 'Selesai dengan kegagalan', 'Dibatalkan')`;
+const SWEEP_EVERY_MS = 60000;
+let lastSweep = 0;
+
+async function cleanupBatchMedia(batchId) {
+  // Hanya batch yang sudah final dan tidak ada item yang sedang diproses
+  const ready = await db.query(
+    `SELECT 1 FROM batches b
+     WHERE b.id = $1
+       AND b.status IN ${FINAL_BATCH_STATUS_SQL}
+       AND NOT EXISTS (
+         SELECT 1 FROM batch_items WHERE batch_id = b.id AND status = 'processing'
+       )`,
+    [batchId],
+  );
+  if (ready.rows.length === 0) return 0;
+
+  // File yang masih dipakai template / batch lain tidak ikut dihapus (jaga-jaga)
+  const { rows } = await db.query(
+    `SELECT bm.file_name
+     FROM batch_images bm
+     WHERE bm.batch_id = $1
+       AND NOT EXISTS (SELECT 1 FROM template_images ti WHERE ti.file_name = bm.file_name)
+       AND NOT EXISTS (
+         SELECT 1 FROM batch_images o
+         WHERE o.file_name = bm.file_name AND o.batch_id <> bm.batch_id
+       )`,
+    [batchId],
+  );
+  media.removeImages(rows.map((r) => r.file_name));
+  await db.query(`DELETE FROM batch_images WHERE batch_id = $1`, [batchId]);
+  if (rows.length > 0) {
+    console.log(`🧹 ${rows.length} file media batch #${batchId} dibersihkan.`);
+  }
+  return rows.length;
+}
+
+// Cadangan: bersihkan batch final yang belum sempat dibersihkan
+// (batch dibatalkan dari aplikasi, worker sempat mati, dsb.)
+async function sweepBatchMedia() {
+  const { rows } = await db.query(
+    `SELECT DISTINCT bm.batch_id
+     FROM batch_images bm
+     JOIN batches b ON b.id = bm.batch_id
+     WHERE b.status IN ${FINAL_BATCH_STATUS_SQL}`,
+  );
+  for (const r of rows) {
+    await cleanupBatchMedia(r.batch_id);
+  }
+}
+
 async function markFailed(task, reason) {
   await db.query(
     `UPDATE batch_items SET status = 'failed', error_log = $2 WHERE id = $1`,
@@ -606,7 +663,7 @@ function splitBubbles(text) {
     .split(BUBBLE_RE)
     .map((p) => p.trim())
     .filter(Boolean);
-  return parts.length ? parts : [String(text ?? "")];
+  return parts; // teks kosong -> [] (template hanya media tidak punya bubble teks)
 }
 
 // Kirim pesan: bubble 1 (+ gambar bila ada) dulu, lalu voice note (bila ada),
@@ -614,7 +671,9 @@ function splitBubbles(text) {
 // Jika gagal di tengah jalan, error diberi tanda "partial" agar item tidak dikirim ulang.
 async function deliver(jid, text, imageNames) {
   if (!sock) throw new Error("Koneksi terputus saat menunggu jeda auto-reply.");
-  const [first, ...rest] = splitBubbles(text);
+  const bubbles = splitBubbles(text);
+  const first = bubbles[0] || ""; // "" = tanpa teks (hanya gambar / voice note)
+  const rest = bubbles.slice(1);
 
   const files = []; // gambar
   let voice = null; // voice note (maks 1)
@@ -632,20 +691,23 @@ async function deliver(jid, text, imageNames) {
 
   const steps = [];
   if (files.length === 0) {
-    steps.push(() => sock.sendMessage(jid, { text: first }));
+    // Jangan pernah kirim bubble teks kosong
+    if (first) steps.push(() => sock.sendMessage(jid, { text: first }));
   } else {
     const captionFits = first.length <= CAPTION_LIMIT;
     files.forEach((f, i) => {
       steps.push(() =>
         sock.sendMessage(
           jid,
-          i === 0 && captionFits
+          i === 0 && first && captionFits
             ? { image: f.buffer, mimetype: f.mimetype, caption: first }
             : { image: f.buffer, mimetype: f.mimetype },
         ),
       );
     });
-    if (!captionFits) steps.push(() => sock.sendMessage(jid, { text: first }));
+    if (first && !captionFits) {
+      steps.push(() => sock.sendMessage(jid, { text: first }));
+    }
   }
 
   // Voice Note (PTT): dikirim setelah bubble/gambar pertama
@@ -662,6 +724,15 @@ async function deliver(jid, text, imageNames) {
 
   for (const bubble of rest) {
     steps.push(() => sock.sendMessage(jid, { text: bubble }));
+  }
+
+  // Tidak ada yang bisa dikirim (teks kosong DAN semua file media hilang)
+  if (steps.length === 0) {
+    const err = new Error(
+      "Tidak ada isi yang bisa dikirim (teks kosong dan file media tidak ditemukan).",
+    );
+    err.status = 400;
+    throw err;
   }
 
   let sent = 0;
@@ -683,13 +754,10 @@ async function deliver(jid, text, imageNames) {
     throw err;
   }
 
-  const modeParts = [
-    files.length > 1
-      ? `${files.length} gambar`
-      : files.length === 1
-        ? "gambar"
-        : "teks",
-  ];
+  const modeParts = [];
+  if (files.length > 1) modeParts.push(`${files.length} gambar`);
+  else if (files.length === 1) modeParts.push("gambar");
+  else if (first) modeParts.push("teks");
   if (voice) modeParts.push("voice note");
   const mode = modeParts.join(" + ");
   return rest.length ? `${mode}, ${rest.length + 1} bubble` : mode;
@@ -817,12 +885,23 @@ async function sendTask(task) {
     return "failed";
   } finally {
     await finalizeBatchIfDone(task.batch_id).catch(() => {});
+    await cleanupBatchMedia(task.batch_id).catch((e) =>
+      console.error("⚠️  Gagal membersihkan media batch:", e.message),
+    );
   }
 }
 
 async function processLoop() {
   while (running) {
     try {
+      // Sapu berkala: salinan media batch yang sudah selesai / dibatalkan
+      if (Date.now() - lastSweep >= SWEEP_EVERY_MS) {
+        lastSweep = Date.now();
+        await sweepBatchMedia().catch((e) =>
+          console.error("⚠️  Sapu media batch gagal:", e.message),
+        );
+      }
+
       if (!isConnected()) {
         await sleep(IDLE_POLL_MS);
         continue;

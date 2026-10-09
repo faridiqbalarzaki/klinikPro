@@ -597,7 +597,8 @@ const WaPreview = ({ text, images = [], className = "" }) => {
     hour: "2-digit",
     minute: "2-digit",
   });
-  const bubbles = splitBubbles(text);
+  const hasText = String(text ?? "").trim() !== "";
+  const bubbles = hasText ? splitBubbles(text) : [""];
   return (
     <div
       className={`bg-[#efeae2] rounded-[2rem] p-4 sm:p-6 relative overflow-hidden border border-gray-200 ${className}`}
@@ -610,54 +611,62 @@ const WaPreview = ({ text, images = [], className = "" }) => {
         }}
       />
       <div className="relative z-10 flex flex-col items-start gap-1.5">
-        {bubbles.map((bubble, bi) => (
-          <Fragment key={bi}>
-            <div className="wa-bubble animate-fade-in w-fit max-w-[85%] bg-white rounded-lg p-1.5 shadow-sm border border-gray-100 flex flex-col">
-              {bi === 0 && pics.length > 0 && (
-                <div
-                  data-testid="wa-preview-images"
-                  className={`mb-1 rounded-md overflow-hidden grid gap-0.5 ${pics.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}
-                >
-                  {pics.map((img, i) => (
+        {bubbles.map((bubble, bi) => {
+          // Tanpa teks & tanpa gambar, tapi ada voice -> cukup tampilkan bubble voice
+          const skipTextBubble = !bubble && pics.length === 0 && voice;
+          return (
+            <Fragment key={bi}>
+              {!skipTextBubble && (
+                <div className="wa-bubble animate-fade-in w-fit max-w-[85%] bg-white rounded-lg p-1.5 shadow-sm border border-gray-100 flex flex-col">
+                  {bi === 0 && pics.length > 0 && (
                     <div
-                      key={`${i}-${img.slice(-24)}`}
-                      className={`bg-gray-100 overflow-hidden ${pics.length % 2 === 1 && i === 0 && pics.length > 1 ? "col-span-2" : ""}`}
+                      data-testid="wa-preview-images"
+                      className={`mb-1 rounded-md overflow-hidden grid gap-0.5 ${pics.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}
                     >
-                      <img
-                        src={imageSrc(img)}
-                        alt={`Media ${i + 1}`}
-                        className={`w-full object-cover ${pics.length === 1 ? "max-h-48" : "h-24"}`}
-                      />
+                      {pics.map((img, i) => (
+                        <div
+                          key={`${i}-${img.slice(-24)}`}
+                          className={`bg-gray-100 overflow-hidden ${pics.length % 2 === 1 && i === 0 && pics.length > 1 ? "col-span-2" : ""}`}
+                        >
+                          <img
+                            src={imageSrc(img)}
+                            alt={`Media ${i + 1}`}
+                            className={`w-full object-cover ${pics.length === 1 ? "max-h-48" : "h-24"}`}
+                          />
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  <div className="px-1.5 pb-1 pt-1">
+                    {(bubble || pics.length === 0) && (
+                      <p className="text-[14px] leading-relaxed text-[#111b21] whitespace-pre-wrap break-words">
+                        {bubble || (
+                          <span className="text-gray-400 italic">
+                            Ketik pesan untuk melihat pratinjau...
+                          </span>
+                        )}
+                      </p>
+                    )}
+                    <div className="text-[10px] text-gray-400 text-right mt-1 font-medium">
+                      {time}
+                    </div>
+                  </div>
                 </div>
               )}
-              <div className="px-1.5 pb-1 pt-1">
-                <p className="text-[14px] leading-relaxed text-[#111b21] whitespace-pre-wrap break-words">
-                  {bubble || (
-                    <span className="text-gray-400 italic">
-                      Ketik pesan untuk melihat pratinjau...
-                    </span>
-                  )}
-                </p>
-                <div className="text-[10px] text-gray-400 text-right mt-1 font-medium">
-                  {time}
+              {bi === 0 && voice && (
+                <div className="wa-bubble w-fit max-w-[85%] bg-white rounded-lg p-2 shadow-sm border border-gray-100 flex items-center gap-2">
+                  <Mic className="w-4 h-4 text-pink-500 shrink-0" />
+                  <audio
+                    controls
+                    preload="metadata"
+                    src={imageSrc(voice)}
+                    className="h-9 w-48"
+                  />
                 </div>
-              </div>
-            </div>
-            {bi === 0 && voice && (
-              <div className="wa-bubble w-fit max-w-[85%] bg-white rounded-lg p-2 shadow-sm border border-gray-100 flex items-center gap-2">
-                <Mic className="w-4 h-4 text-pink-500 shrink-0" />
-                <audio
-                  controls
-                  preload="metadata"
-                  src={imageSrc(voice)}
-                  className="h-9 w-48"
-                />
-              </div>
-            )}
-          </Fragment>
-        ))}
+              )}
+            </Fragment>
+          );
+        })}
       </div>
     </div>
   );
@@ -945,11 +954,13 @@ const CreateBatchTab = () => {
   const batchCount = Math.ceil(parsedList.length / MAX_BATCH_SIZE);
   const waReady = waStatus === "open";
   const hasSchedule = sendNow || Boolean(scheduleDate);
+  const hasMedia = selectedTemplateImages.length > 0;
+  const hasMessage = message.trim() !== "" || hasMedia; // teks ATAU media cukup
   const canSubmit =
     !submitting &&
     !isOverLimit &&
     parsedList.length > 0 &&
-    message.trim() &&
+    hasMessage &&
     hasSchedule;
 
   // Template broadcast (bukan auto-reply), dikelompokkan per waktu di dropdown
@@ -1022,8 +1033,11 @@ const CreateBatchTab = () => {
 
   // Daftar > 100 otomatis dipecah (mis. 250 -> 100, 100, 50)
   const handleScheduleBatch = async () => {
-    if (parsedList.length === 0 || !message.trim() || !hasSchedule) {
-      notify("error", "Lengkapi daftar customer, pesan, dan jadwal kirim.");
+    if (parsedList.length === 0 || !hasMessage || !hasSchedule) {
+      notify(
+        "error",
+        "Lengkapi daftar customer, pesan/media, dan jadwal kirim.",
+      );
       return;
     }
     const when = sendNow ? new Date() : new Date(scheduleDate);
@@ -1421,7 +1435,7 @@ const CreateBatchTab = () => {
                 <MessageSquare className="w-4 h-4 text-gray-400" /> Pesan
               </span>
               <span className="text-sm font-bold text-gray-900">
-                {message.trim() ? "Terisi" : "-"}
+                {message.trim() || hasMedia ? "Terisi" : "-"}
               </span>
             </div>
             <div className="flex justify-between items-center p-4 gap-3">
@@ -1935,7 +1949,7 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
   };
 
   const handleSave = async () => {
-    // Ambil isi teks jika ada
+    // Gabungkan teks (per bubble jika jenis multi-bubble)
     const finalContent = usesParts
       ? partTexts
           .slice(0, group.parts.length)
@@ -1944,21 +1958,25 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
           .join(`\n${BUBBLE_SEP}\n`)
       : content.trim();
 
-    const hasContent = Boolean(finalContent && finalContent.trim());
+    const hasContent = finalContent !== "";
     const hasMedia = images.length > 0;
 
+    // 1. Nama wajib
     if (!name.trim()) {
       notify("error", "Nama template wajib diisi.");
       return;
     }
 
-    // Jika TIDAK ADA teks DAN TIDAK ADA media/voice note, baru beri error
+    // 2. Error HANYA jika teks DAN media sama-sama kosong
     if (!hasContent && !hasMedia) {
-      notify("error", "Isi pesan teks atau unggah Voice Note terlebih dahulu.");
+      notify(
+        "error",
+        "Isi pesan teks atau unggah Voice Note/Gambar terlebih dahulu.",
+      );
       return;
     }
 
-    // HANYA validasi bubble chat jika pengguna memang mengisi teks pada multi-bubble
+    // 3. Validasi bubble HANYA jika teks memang diisi
     if (
       usesParts &&
       hasContent &&
@@ -1971,39 +1989,32 @@ const EditTemplateModal = ({ template, onClose, onSaved }) => {
       return;
     }
 
-    if (tplType === "auto_reply" && !keywords.trim()) {
+    // 4. Auto-reply wajib keyword
+    if (isAuto && !keywords.trim()) {
       notify("error", "Template auto-reply wajib punya minimal 1 keyword.");
       return;
     }
 
-    setIsSubmitting(true);
+    setSaving(true);
     try {
       const payload = {
         name: name.trim(),
-        content: finalContent || "", // Berikan string kosong jika hanya voice note
-        type: tplType,
+        content: finalContent, // "" jika hanya media
+        images, // nama file lama + data URL baru; [] jika semua media dihapus
       };
-      if (tplType === "auto_reply") payload.keywords = keywords;
-      if (tplType === "manual_fu") payload.time_slot = tplGroup;
-      if (images.length > 0) payload.images = images;
+      if (isAuto) payload.keywords = keywords;
 
-      const newTemplate = await api("/api/templates", {
-        method: "POST",
+      const updated = await api(`/api/templates/${template.id}`, {
+        method: "PUT",
         body: JSON.stringify(payload),
       });
-      setTemplates([newTemplate, ...templates]);
-      setName("");
-      setContent("");
-      setImages([]);
-      setTplType("manual_fu");
-      setTplGroup("followup");
-      setPartTexts(["", ""]);
-      setKeywords("");
-      notify("success", "Template Voice Note berhasil disimpan!");
+      onSaved(updated);
+      notify("success", "Template berhasil diperbarui!");
+      onClose();
     } catch (err) {
       notify("error", `Gagal menyimpan template: ${err.message}`);
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
   };
 
@@ -2239,9 +2250,13 @@ const TemplateCard = ({ t, onDelete, onSetGroup, onEdit }) => {
           )}
         </div>
       )}
-      <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-100 whitespace-pre-wrap line-clamp-3">
-        {t.content.replace(BUBBLE_RE_G, "\n↓ bubble berikutnya\n")}
-      </p>
+      {t.content?.trim() ? (
+        <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-100 whitespace-pre-wrap line-clamp-3">
+          {t.content.replace(BUBBLE_RE_G, "\n↓ bubble berikutnya\n")}
+        </p>
+      ) : (
+        <p className="text-xs text-gray-400 italic">Tanpa teks, hanya media.</p>
+      )}
       {t.type !== "auto_reply" && (
         <div className="relative">
           <select
@@ -2359,7 +2374,7 @@ const TemplatesTab = () => {
       setTplGroup("followup");
       setPartTexts(["", ""]);
       setKeywords("");
-      notify("success", "Template Voice Note berhasil disimpan!");
+      notify("success", "Template berhasil disimpan!");
     } catch (err) {
       notify("error", `Gagal menyimpan template: ${err.message}`);
     } finally {

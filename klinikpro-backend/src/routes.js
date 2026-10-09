@@ -32,7 +32,8 @@ router.post("/templates", async (req, res, next) => {
     const { name, content, type, keywords, time_slot, images } = req.body;
 
     const hasMedia = Array.isArray(images) && images.length > 0;
-    const hasContent = typeof content === "string" && content.trim() !== "";
+    const cleanContent = typeof content === "string" ? content.trim() : "";
+    const hasContent = cleanContent !== "";
 
     if (!name || !name.trim()) {
       throw media.httpError(400, "Nama template wajib diisi.");
@@ -77,7 +78,7 @@ router.post("/templates", async (req, res, next) => {
        RETURNING *`,
       [
         name.trim(),
-        content ? content.trim() : "",
+        cleanContent,
         type || "manual_fu",
         kwArray,
         time_slot || null,
@@ -108,7 +109,8 @@ router.put("/templates/:id", async (req, res, next) => {
     const { name, content, keywords, time_slot, images } = req.body;
 
     const hasMedia = Array.isArray(images) && images.length > 0;
-    const hasContent = typeof content === "string" && content.trim() !== "";
+    const cleanContent = typeof content === "string" ? content.trim() : "";
+    const hasContent = cleanContent !== "";
 
     if (!name || !name.trim()) {
       throw media.httpError(400, "Nama template wajib diisi.");
@@ -148,13 +150,7 @@ router.put("/templates/:id", async (req, res, next) => {
            updated_at = NOW()
        WHERE id = $5
        RETURNING *`,
-      [
-        name.trim(),
-        content ? content.trim() : "",
-        time_slot || null,
-        kwArray,
-        id,
-      ],
+      [name.trim(), cleanContent, time_slot || null, kwArray, id],
     );
 
     if (rows.length === 0)
@@ -397,6 +393,8 @@ router.get("/batches", async (req, res, next) => {
 });
 
 router.post("/batches", async (req, res, next) => {
+  let copies = []; // salinan media milik batch ini
+  let batchId = null;
   try {
     const { name, message_text, scheduled_at, recipients, images } = req.body;
 
@@ -404,23 +402,41 @@ router.post("/batches", async (req, res, next) => {
       throw media.httpError(400, "Penerima wajib diisi.");
     }
 
+    const text = typeof message_text === "string" ? message_text.trim() : "";
+    const imageNames = media.toImageList(images);
+
+    if (!text && imageNames.length === 0) {
+      throw media.httpError(
+        400,
+        "Batch harus berisi teks atau media (Voice Note/Gambar).",
+      );
+    }
+
+    // Salin media agar batch tetap utuh walau template dihapus
+    const copied = imageNames.length ? media.copyImages(imageNames) : [];
+    if (copied === null) {
+      throw media.httpError(
+        400,
+        "File media template tidak ditemukan. Simpan ulang template-nya.",
+      );
+    }
+    copies = copied;
+
     const { rows } = await db.query(
       `INSERT INTO batches (name, message_text, scheduled_at, status)
        VALUES ($1, $2, $3, 'Terjadwal')
        RETURNING *`,
-      [name, message_text || "", scheduled_at],
+      [name, text, scheduled_at],
     );
 
     const batch = rows[0];
+    batchId = batch.id;
 
-    // Simpan gambar batch jika ada
-    if (Array.isArray(images) && images.length > 0) {
-      for (let i = 0; i < images.length; i++) {
-        await db.query(
-          `INSERT INTO batch_images (batch_id, file_name, position) VALUES ($1, $2, $3)`,
-          [batch.id, images[i], i],
-        );
-      }
+    for (let i = 0; i < copies.length; i++) {
+      await db.query(
+        `INSERT INTO batch_images (batch_id, file_name, position) VALUES ($1, $2, $3)`,
+        [batch.id, copies[i], i],
+      );
     }
 
     // Insert Recipients
@@ -434,6 +450,20 @@ router.post("/batches", async (req, res, next) => {
 
     res.json(batch);
   } catch (err) {
+    // Gagal di tengah jalan: jangan tinggalkan salinan file yatim di folder uploads
+    if (batchId !== null) {
+      // Batch sudah terlanjur tercatat: batalkan agar worker tidak mengirimnya
+      await db
+        .query(
+          `UPDATE batches SET status = 'Dibatalkan', updated_at = NOW() WHERE id = $1`,
+          [batchId],
+        )
+        .catch(() => {});
+      await db
+        .query(`DELETE FROM batch_images WHERE batch_id = $1`, [batchId])
+        .catch(() => {});
+    }
+    media.removeImages(copies);
     next(err);
   }
 });
