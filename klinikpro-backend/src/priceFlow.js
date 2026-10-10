@@ -68,6 +68,50 @@ const COMPLAINT_KEYWORDS = [
   "bikin putih",
   "biar putih",
   "bisa putih",
+
+  // 5. Keluhan umum lain (tambahan). Tetap frasa/kata spesifik, bukan kata
+  // tunggal yang ambigu ("cerah", "gelap", "kasar", "luka" sendirian TIDAK memicu).
+  "kulit sensitif",
+  "wajah sensitif",
+  "muka sensitif",
+  "pori besar",
+  "pori pori",
+  "kulit berminyak",
+  "wajah berminyak",
+  "muka berminyak",
+  "kulit kasar",
+  "wajah kasar",
+  "muka kasar",
+  "kulit gelap",
+  "wajah gelap",
+  "muka gelap",
+  "dekil",
+  "kerutan",
+  "keriput",
+  "penuaan",
+  "anti aging",
+  "antiaging",
+  "kulit kendur",
+  "wajah kendur",
+  "melasma",
+  "hiperpigmentasi",
+  "bopeng",
+  "bekas luka",
+  "kantung mata",
+  "mata panda",
+  "kemerahan",
+  "mau cerah",
+  "pengen cerah",
+  "ingin cerah",
+  "biar cerah",
+  "bikin cerah",
+  "cerahin",
+  "mencerahkan",
+  "kurang cerah",
+  "tidak cerah",
+  "gak cerah",
+  "ga cerah",
+  "nggak cerah",
 ];
 
 // Pilihan menu angka 1-6: hanya dianggap keluhan jika pesannya cuma angka itu
@@ -202,7 +246,9 @@ function isComplaint(text) {
 // orang yang sama (HP vs WhatsApp Web).
 const store = new Map(); // key -> { state, at }
 const lastConsultedMap = new Map(); // key -> timestamp
-const COOLDOWN_24H_MS = 24 * 60 * 60 * 1000;
+// Lama cooldown setelah konsultasi (SOP tidak diulang). Default 24 jam.
+const COOLDOWN_MS =
+  Number(process.env.PRICE_CONSULT_COOLDOWN_MS) || 24 * 60 * 60 * 1000;
 const lidToPn = new Map(); // "123@lid" -> "62812...@s.whatsapp.net"
 
 const stripDevice = (jid) =>
@@ -239,6 +285,39 @@ function registerLid(lid, pn) {
   return true;
 }
 
+// ---------- Persistensi (opsional) ----------
+// priceFlow.js tidak tahu soal database. inbox.js memasang hook yang menyimpan
+// dua hal yang harus tahan restart: cooldown konsultasi & status HANDOFF.
+// Keduanya juga dipulihkan lewat restoreConsulted / restoreHandoff saat start.
+let persistHook = null;
+function setPersistHook(fn) {
+  persistHook = typeof fn === "function" ? fn : null;
+}
+function emit(evt) {
+  if (!persistHook) return;
+  try {
+    Promise.resolve(persistHook(evt)).catch(() => {});
+  } catch (_) {}
+}
+
+function restoreConsulted(jid, ms) {
+  const k = canonicalJid(jid);
+  const t = Number(ms);
+  if (!k || !t) return;
+  lastConsultedMap.set(k, Math.max(t, lastConsultedMap.get(k) || 0));
+}
+
+function restoreHandoff(jid, untilMs) {
+  const k = canonicalJid(jid);
+  const until = Number(untilMs);
+  if (!k || !(until > Date.now()) || store.has(k)) return;
+  store.set(k, {
+    state: STATES.HANDOFF,
+    at: until - HANDOFF_TTL_MS,
+    misses: 0,
+  });
+}
+
 // ---------- State ----------
 const ttlOf = (e) =>
   e.state === STATES.HANDOFF ? HANDOFF_TTL_MS : STATE_TTL_MS;
@@ -258,8 +337,14 @@ function getState(jid) {
 function setState(jid, state) {
   const k = canonicalJid(jid);
   if (!k) return;
-  if (state === STATES.IDLE) store.delete(k);
-  else store.set(k, { state, at: Date.now(), misses: 0 });
+  if (state === STATES.IDLE) {
+    store.delete(k);
+    return;
+  }
+  store.set(k, { state, at: Date.now(), misses: 0 });
+  if (state === STATES.HANDOFF) {
+    emit({ type: "handoff", jid: k, until: Date.now() + HANDOFF_TTL_MS });
+  }
 }
 
 // Tambah hitungan "jawaban belum berisi keluhan" (sekaligus perpanjang TTL).
@@ -275,7 +360,10 @@ function bumpMisses(jid) {
 
 function setConsultedNow(jid) {
   const k = canonicalJid(jid);
-  if (k) lastConsultedMap.set(k, Date.now());
+  if (!k) return;
+  const now = Date.now();
+  lastConsultedMap.set(k, now);
+  emit({ type: "consulted", jid: k, at: now });
 }
 
 function hasConsultedWithin24h(jid) {
@@ -283,7 +371,7 @@ function hasConsultedWithin24h(jid) {
   if (!k) return false;
   const lastTime = lastConsultedMap.get(k);
   if (!lastTime) return false;
-  return Date.now() - lastTime < COOLDOWN_24H_MS;
+  return Date.now() - lastTime < COOLDOWN_MS;
 }
 
 // Bersihkan entri kadaluarsa supaya Map tidak membengkak
@@ -292,7 +380,7 @@ setInterval(
     const now = Date.now();
     for (const [k, e] of store) if (now - e.at > ttlOf(e)) store.delete(k);
     for (const [k, t] of lastConsultedMap)
-      if (now - t > COOLDOWN_24H_MS) lastConsultedMap.delete(k);
+      if (now - t > COOLDOWN_MS) lastConsultedMap.delete(k);
   },
   10 * 60 * 1000,
 ).unref();
@@ -321,6 +409,8 @@ module.exports = {
   STEP_AKHIR_CAPTION: STEP3_TESTI_CAPTION, // Alias agar kode lama tidak terganggu
 
   MAX_REASKS,
+  COOLDOWN_MS,
+  HANDOFF_TTL_MS,
   normalizeText,
   isPriceQuestion,
   isComplaint,
@@ -337,4 +427,9 @@ module.exports = {
 
   setConsultedNow,
   hasConsultedWithin24h,
+
+  // Persistensi
+  setPersistHook,
+  restoreConsulted,
+  restoreHandoff,
 };

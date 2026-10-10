@@ -263,6 +263,80 @@ async function initLidMap(query) {
   }
 }
 
+// ------------------------------------------------------------------
+// Status SOP yang harus tahan restart: cooldown konsultasi & HANDOFF
+// (tabel price_flow_state, kunci = JID kanonis)
+// ------------------------------------------------------------------
+const PRICE_STATE_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS price_flow_state (
+    jid               text PRIMARY KEY,
+    last_consulted_at timestamptz,
+    handoff_until     timestamptz,
+    updated_at        timestamptz NOT NULL DEFAULT NOW()
+  )`;
+
+let priceStoreReady = false;
+async function initPriceFlowStore(query) {
+  if (priceStoreReady) return;
+  priceStoreReady = true; // coba sekali per proses; gagal -> hanya di-log
+  try {
+    await query(PRICE_STATE_TABLE_SQL);
+    await query(
+      `DELETE FROM price_flow_state
+       WHERE (last_consulted_at IS NULL
+              OR last_consulted_at <= NOW() - ($1::bigint * interval '1 millisecond'))
+         AND (handoff_until IS NULL OR handoff_until <= NOW())`,
+      [priceFlow.COOLDOWN_MS],
+    );
+    const r = await query(
+      `SELECT jid, last_consulted_at, handoff_until FROM price_flow_state
+       WHERE last_consulted_at > NOW() - ($1::bigint * interval '1 millisecond')
+          OR handoff_until > NOW()`,
+      [priceFlow.COOLDOWN_MS],
+    );
+    for (const row of r?.rows || []) {
+      if (row.last_consulted_at)
+        priceFlow.restoreConsulted(
+          row.jid,
+          new Date(row.last_consulted_at).getTime(),
+        );
+      if (row.handoff_until)
+        priceFlow.restoreHandoff(
+          row.jid,
+          new Date(row.handoff_until).getTime(),
+        );
+    }
+    dbg(`price_flow_state dimuat: ${(r?.rows || []).length} baris`);
+  } catch (err) {
+    console.error("⚠️  Gagal memuat price_flow_state:", err.message);
+  }
+}
+
+// Dipanggil lewat hook priceFlow setiap kali cooldown/handoff berubah
+async function savePriceFlowEvent(query, evt) {
+  try {
+    if (evt.type === "consulted") {
+      await query(
+        `INSERT INTO price_flow_state (jid, last_consulted_at)
+         VALUES ($1::text, $2::timestamptz)
+         ON CONFLICT (jid) DO UPDATE
+           SET last_consulted_at = EXCLUDED.last_consulted_at, updated_at = NOW()`,
+        [evt.jid, new Date(evt.at)],
+      );
+    } else if (evt.type === "handoff") {
+      await query(
+        `INSERT INTO price_flow_state (jid, handoff_until)
+         VALUES ($1::text, $2::timestamptz)
+         ON CONFLICT (jid) DO UPDATE
+           SET handoff_until = EXCLUDED.handoff_until, updated_at = NOW()`,
+        [evt.jid, new Date(evt.until)],
+      );
+    }
+  } catch (err) {
+    console.error("⚠️  Gagal menyimpan price_flow_state:", err.message);
+  }
+}
+
 async function saveLidMapping(query, lid, pn) {
   try {
     await query(
@@ -278,6 +352,18 @@ async function saveLidMapping(query, lid, pn) {
          AND NOT EXISTS (SELECT 1 FROM customers c2 WHERE c2.phone = $2::text)`,
       [phoneFromJid(lid), phoneFromJid(pn), pn],
     );
+    // Status SOP (cooldown/handoff) atas nama LID -> gabung ke nomor asli
+    await query(
+      `INSERT INTO price_flow_state (jid, last_consulted_at, handoff_until)
+       SELECT $2::text, last_consulted_at, handoff_until
+       FROM price_flow_state WHERE jid = $1::text
+       ON CONFLICT (jid) DO UPDATE SET
+         last_consulted_at = GREATEST(price_flow_state.last_consulted_at, EXCLUDED.last_consulted_at),
+         handoff_until     = GREATEST(price_flow_state.handoff_until, EXCLUDED.handoff_until),
+         updated_at        = NOW()`,
+      [lid, pn],
+    );
+    await query("DELETE FROM price_flow_state WHERE jid = $1::text", [lid]);
   } catch (err) {
     console.error("⚠️  Gagal menyimpan mapping LID:", err.message);
   }
@@ -720,7 +806,9 @@ async function handleUpsert(sock, upsert, deps = {}) {
     deps.sendSteps ||
     ((jid, complaint) => sendConsultativeSteps(sock, jid, d.sleep, complaint));
 
+  priceFlow.setPersistHook((evt) => savePriceFlowEvent(d.query, evt));
   await initLidMap(d.query);
+  await initPriceFlowStore(d.query);
 
   for (const msg of upsert.messages || []) {
     try {
