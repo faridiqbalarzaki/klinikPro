@@ -521,35 +521,67 @@ async function processMessage(sock, msg, deps) {
   );
 
   // --- 0. Alur konsultatif harga: tahan harga, tanya keluhan dulu ---
+  // SOP solusi HANYA dipicu sinyal keluhan yang kuat (kata/frasa di
+  // priceFlow.COMPLAINT_KEYWORDS, angka menu 1-6, foto, pesan suara).
   const { STATES } = priceFlow;
   const priceState = priceFlow.getState(jid);
   const hasPriceWord =
     Boolean(content.text) && priceFlow.isPriceQuestion(content.text);
-  let priceComplaint = false;
+  const complaintHit = content.text
+    ? priceFlow.matchComplaint(content.text)
+    : null;
+  let priceComplaint = false; // pesan ini sudah dijawab alur SOP
+  let skipAutoReply = false; // harga otomatis ditahan (CS yang menangani)
 
   if (priceFlow.hasConsultedWithin24h(jid)) {
-    // Sudah konsultasi <24 jam: SOP (tanya keluhan & kirim solusi) tidak boleh
-    // jalan lagi, apa pun isi pesannya (lokasi, harga, dll). Lanjut ke
-    // auto-reply/tiket supaya CS yang menangani.
+    // Sudah konsultasi <24 jam: SOP tidak boleh jalan lagi, apa pun isi
+    // pesannya (lokasi, harga, dll). Lanjut ke auto-reply/tiket.
     dbg(`Nomor ${phone} sudah konsultasi <24 jam, SOP dilewati.`);
+  } else if (priceState === STATES.HANDOFF) {
+    // Sudah ditanya ulang melebihi batas: CS yang menangani. SOP berhenti dan
+    // harga otomatis ikut ditahan supaya tidak bocor tanpa konsultasi.
+    skipAutoReply = hasPriceWord;
+    dbg(`Nomor ${phone} status HANDOFF, SOP dilewati (tiket untuk CS).`);
   } else if (
     priceState === STATES.WAITING_FOR_COMPLAINT &&
     (content.text || content.label)
   ) {
-    const looksLikeComplaint =
+    const strongSignal =
       content.hasAttachment || // foto wajah
       !content.text || // pesan suara
-      priceFlow.isComplaint(content.text);
+      complaintHit; // kata/frasa keluhan atau angka menu
 
-    if (hasPriceWord && !looksLikeComplaint) {
-      // Masih tanya harga/produk, bukan keluhan -> ulangi pertanyaan SOP
-      priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
-      await humanDelay(sock, jid, deps);
-      await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
-      return { action: "price_gate_repeat" };
+    if (!strongSignal) {
+      // Belum ada keluhan (nanya harga lagi / sapaan / jawaban tak jelas)
+      const misses = priceFlow.bumpMisses(jid);
+      if (misses <= priceFlow.MAX_REASKS) {
+        await humanDelay(sock, jid, deps);
+        await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
+        return { action: "price_gate_repeat" };
+      }
+      // Batas tanya ulang tercapai -> serahkan ke CS lewat tiket
+      priceFlow.setState(jid, STATES.HANDOFF);
+      skipAutoReply = true;
+      console.log(
+        `🙋 ${phone} belum menyebut keluhan setelah ${priceFlow.MAX_REASKS}x ditanya ulang, diserahkan ke CS`,
+      );
+    } else {
+      dbg(
+        `Keluhan terdeteksi: ${
+          complaintHit
+            ? `${complaintHit.kind} "${complaintHit.keyword}"`
+            : "lampiran/pesan suara"
+        }`,
+      );
+      // state & cooldown diset SEBELUM kirim (await)
+      priceFlow.setConsultedNow(jid);
+      priceFlow.setState(jid, STATES.IDLE);
+      await replyConsultative(sock, jid, phone, deps, content.text);
+      priceComplaint = true;
     }
-
-    // Keluhan diterima -> state & cooldown diset SEBELUM kirim (await)
+  } else if (priceState === STATES.IDLE && complaintHit) {
+    // Keluhan langsung (walau sekaligus nanya harga) -> tak perlu ditanya lagi
+    dbg(`Keluhan langsung: ${complaintHit.kind} "${complaintHit.keyword}"`);
     priceFlow.setConsultedNow(jid);
     priceFlow.setState(jid, STATES.IDLE);
     await replyConsultative(sock, jid, phone, deps, content.text);
@@ -566,21 +598,11 @@ async function processMessage(sock, msg, deps) {
     }
     console.log(`💬 Pertanyaan harga dari ${phone} ditahan, menunggu keluhan`);
     return { action: "price_gate" };
-  } else if (
-    priceState === STATES.IDLE &&
-    content.text &&
-    priceFlow.isComplaint(content.text)
-  ) {
-    // Keluhan langsung tanpa ditanya -> kirim SOP
-    priceFlow.setConsultedNow(jid);
-    priceFlow.setState(jid, STATES.IDLE);
-    await replyConsultative(sock, jid, phone, deps, content.text);
-    priceComplaint = true;
   }
 
   // --- 1. Auto-reply (jika cocok: balas, lalu berhenti — tidak ada tiket) ---
   // Dilewati jika pesan ini sudah dijawab oleh alur harga
-  if (content.text && !priceComplaint) {
+  if (content.text && !priceComplaint && !skipAutoReply) {
     const tpls = (await deps.query(AUTO_REPLY_SQL)).rows;
     const hit = matchAutoReply(content.text, tpls);
     if (hit) {

@@ -7,9 +7,13 @@ const STATES = Object.freeze({
   IDLE: "IDLE",
   WAITING_FOR_COMPLAINT: "WAITING_FOR_COMPLAINT",
   DONE: "DONE",
+  // Pelanggan sudah ditanya ulang melebihi batas tapi tetap tak menyebut keluhan:
+  // SOP berhenti, CS yang menangani, harga otomatis ditahan.
+  HANDOFF: "HANDOFF",
 });
 
-// Dicocokkan di AWAL KATA, jadi "harganya" dan "berapaan" ikut terdeteksi.
+// Dicocokkan per KATA: awal kata harus pas, akhir kata hanya boleh diikuti
+// imbuhan umum (an, nya, ku, ...) atau huruf yang dipanjangkan ("hargaaa").
 const PRICE_KEYWORDS = [
   "harga",
   "biaya",
@@ -19,19 +23,51 @@ const PRICE_KEYWORDS = [
   "brp",
 ];
 
-// Kata keluhan (juga di AWAL KATA). Tambah kata baru di sini bila perlu.
+// Kata keluhan. SOP solusi HANYA dipicu oleh kata/frasa di bawah ini
+// (atau angka menu 1-6, foto, dan pesan suara). Tidak ada kata tunggal yang
+// ambigu: "putih", "kering", "merata", "noda" sengaja DIHAPUS karena muncul di
+// kalimat biasa ("Pasir Putih", "keringat", "pengiriman merata").
 const COMPLAINT_KEYWORDS = [
+  // 1. Kata tunggal kuat & spesifik
   "flek",
   "jerawat",
-  "putih",
-  "kering",
-  "merata",
-  "glowing",
+  "komedo",
   "kusam",
   "belang",
-  "komedo",
   "bruntusan",
-  "noda",
+  "glowing",
+  "pencerah",
+  "pemutih",
+  "memutihkan",
+  "putihin",
+
+  // 2. Frasa kulit/wajah kering (termasuk kata ganti)
+  "kulit kering",
+  "wajah kering",
+  "muka kering",
+  "kulitku kering",
+  "mukaku kering",
+  "wajahku kering",
+
+  // 3. Masalah warna & tekstur
+  "kulit hitam",
+  "wajah hitam",
+  "muka hitam",
+  "noda hitam",
+  "bekas jerawat",
+  "tidak merata",
+  "gak merata",
+  "ga merata",
+  "nggak merata",
+  "ndak merata",
+
+  // 4. Frasa keinginan mencerahkan / memutihkan
+  "mau putih",
+  "pengen putih",
+  "ingin putih",
+  "bikin putih",
+  "biar putih",
+  "bisa putih",
 ];
 
 // Pilihan menu angka 1-6: hanya dianggap keluhan jika pesannya cuma angka itu
@@ -39,6 +75,15 @@ const COMPLAINT_CHOICE_RE = /^[1-6][.)]?$/;
 
 // Jika pelanggan tak membalas keluhan dalam waktu ini, kembali ke IDLE
 const STATE_TTL_MS = Number(process.env.PRICE_STATE_TTL_MS) || 30 * 60 * 1000;
+
+// Maks. berapa kali bot mengulang pertanyaan keluhan bila jawaban pelanggan
+// belum mengandung keluhan. Lewat dari ini -> HANDOFF ke CS.
+const _envReasks = parseInt(process.env.PRICE_MAX_REASKS, 10);
+const MAX_REASKS = Number.isNaN(_envReasks) ? 2 : _envReasks;
+
+// Lama status HANDOFF (SOP & harga otomatis berhenti untuk pelanggan itu)
+const HANDOFF_TTL_MS =
+  Number(process.env.PRICE_HANDOFF_TTL_MS) || 24 * 60 * 60 * 1000;
 
 // Teks SOP: harus persis, jangan diubah
 const ASK_COMPLAINT_TEXT =
@@ -94,34 +139,61 @@ const STEP3_TESTI_CAPTION =
 // Dipakai hanya jika tidak ada template harga di dashboard
 
 // ---------- Pencocokan kata kunci ----------
-function buildStartOfWordRegex(keywords, suffixes = {}) {
-  const parts = keywords.map(
-    (k) =>
-      k
-        .trim()
-        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-        .replace(/\s+/g, "\\s+") + (suffixes[k] || ""),
+// Teks dinormalisasi dulu: huruf kecil, tanpa aksen, selain huruf/angka -> spasi.
+function normalizeText(text) {
+  return String(text ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+// Imbuhan yang boleh menempel di belakang kata kunci: "harganya", "jerawatan".
+const SUFFIX = "(?:an|nya|ku|mu|kan|i|lah|kah|pun)?";
+
+// Aturan kecocokan:
+//  - AWAL kata harus pas (bukan di tengah kata)
+//  - AKHIR kata: hanya imbuhan di atas, plus huruf terakhir boleh dipanjangkan
+//    ("flekkk", "hargaaa"). Jadi "flek" tidak kena "fleksibel", "belang" tidak
+//    kena "belanga".
+//  - `tails` = lookahead tambahan per kata (dipakai untuk "berapa lama" dkk).
+function buildKeywordRegex(keywords, tails = {}) {
+  const parts = keywords.map((k) => {
+    const body = normalizeText(k)
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/ /g, "\\s+");
+    return body + (tails[k] || "");
+  });
+  return new RegExp(
+    `(?<![\\p{L}\\p{N}])(?:${parts.join("|")})${SUFFIX}(?<=(\\p{L}))\\1*(?![\\p{L}])`,
+    "iu",
   );
-  // Awal kata: didahului awal teks atau karakter non huruf/angka
-  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join("|")})`, "iu");
 }
 
 // "berapa lama / berapa kali / berapa hari ..." BUKAN pertanyaan harga
 const NOT_DURATION =
   "(?!\\s+(?:lama|hari|kali|x|jam|menit|minggu|bulan|tahun|banyak|umur|usia)\\b)";
 
-const PRICE_RE = buildStartOfWordRegex(PRICE_KEYWORDS, {
-  berapa: NOT_DURATION,
-});
-const COMPLAINT_RE = buildStartOfWordRegex(COMPLAINT_KEYWORDS);
+const PRICE_RE = buildKeywordRegex(PRICE_KEYWORDS, { berapa: NOT_DURATION });
+const COMPLAINT_RE = buildKeywordRegex(COMPLAINT_KEYWORDS);
 
 function isPriceQuestion(text) {
-  return PRICE_RE.test(String(text || ""));
+  return PRICE_RE.test(normalizeText(text));
+}
+
+// Hasil: null (bukan keluhan) atau { kind: "choice" | "keyword", keyword }.
+// Dipakai inbox.js untuk log: kata mana yang memicu SOP.
+function matchComplaint(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  if (COMPLAINT_CHOICE_RE.test(raw)) return { kind: "choice", keyword: raw };
+  const m = COMPLAINT_RE.exec(normalizeText(raw));
+  return m ? { kind: "keyword", keyword: m[0] } : null;
 }
 
 function isComplaint(text) {
-  const t = String(text || "").trim();
-  return COMPLAINT_CHOICE_RE.test(t) || COMPLAINT_RE.test(t);
+  return matchComplaint(text) !== null;
 }
 
 // ---------- Kunci JID (SATU PINTU) ----------
@@ -168,12 +240,15 @@ function registerLid(lid, pn) {
 }
 
 // ---------- State ----------
+const ttlOf = (e) =>
+  e.state === STATES.HANDOFF ? HANDOFF_TTL_MS : STATE_TTL_MS;
+
 function getState(jid) {
   const k = canonicalJid(jid);
   if (!k) return STATES.IDLE;
   const e = store.get(k);
   if (!e) return STATES.IDLE;
-  if (Date.now() - e.at > STATE_TTL_MS) {
+  if (Date.now() - e.at > ttlOf(e)) {
     store.delete(k);
     return STATES.IDLE;
   }
@@ -184,7 +259,18 @@ function setState(jid, state) {
   const k = canonicalJid(jid);
   if (!k) return;
   if (state === STATES.IDLE) store.delete(k);
-  else store.set(k, { state, at: Date.now() });
+  else store.set(k, { state, at: Date.now(), misses: 0 });
+}
+
+// Tambah hitungan "jawaban belum berisi keluhan" (sekaligus perpanjang TTL).
+// Return jumlah terbaru; 0 jika tidak ada state aktif.
+function bumpMisses(jid) {
+  const k = canonicalJid(jid);
+  const e = k ? store.get(k) : null;
+  if (!e) return 0;
+  e.misses = (e.misses || 0) + 1;
+  e.at = Date.now();
+  return e.misses;
 }
 
 function setConsultedNow(jid) {
@@ -204,7 +290,7 @@ function hasConsultedWithin24h(jid) {
 setInterval(
   () => {
     const now = Date.now();
-    for (const [k, e] of store) if (now - e.at > STATE_TTL_MS) store.delete(k);
+    for (const [k, e] of store) if (now - e.at > ttlOf(e)) store.delete(k);
     for (const [k, t] of lastConsultedMap)
       if (now - t > COOLDOWN_24H_MS) lastConsultedMap.delete(k);
   },
@@ -234,8 +320,11 @@ module.exports = {
   STEP3_TESTI_CAPTION,
   STEP_AKHIR_CAPTION: STEP3_TESTI_CAPTION, // Alias agar kode lama tidak terganggu
 
+  MAX_REASKS,
+  normalizeText,
   isPriceQuestion,
   isComplaint,
+  matchComplaint,
 
   // Kunci JID (satu pintu)
   stripDevice,
@@ -244,6 +333,7 @@ module.exports = {
 
   getState,
   setState,
+  bumpMisses,
 
   setConsultedNow,
   hasConsultedWithin24h,
