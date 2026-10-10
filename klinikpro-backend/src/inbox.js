@@ -210,20 +210,78 @@ function extractContent(message) {
   return null;
 }
 
-function resolveJid(key) {
-  let jid = key?.remoteJid;
-  if (!jid) return null;
-  if (
-    jid.endsWith("@lid") &&
-    String(key.remoteJidAlt || "").endsWith("@s.whatsapp.net")
-  ) {
-    jid = key.remoteJidAlt;
+// SATU-SATUNYA pintu pembuat key JID. Hasilnya dipakai untuk state SOP,
+// cooldown, antrean, dedup, dan tabel customers. Jangan pakai remoteJid mentah.
+// - buang suffix device (":12@")
+// - "@lid" + remoteJidAlt -> catat mapping, pakai nomor asli
+// - "@lid" tanpa alt -> pakai mapping yang pernah tersimpan, jika tidak ada tetap LID
+function resolveJid(key, onNewLid) {
+  const raw = priceFlow.stripDevice(key?.remoteJid);
+  if (!raw) return null;
+
+  if (raw.endsWith("@lid")) {
+    const alt = priceFlow.stripDevice(key.remoteJidAlt);
+    if (alt.endsWith("@s.whatsapp.net") && priceFlow.registerLid(raw, alt)) {
+      try {
+        onNewLid?.(raw, alt);
+      } catch (_) {}
+    }
+    return priceFlow.canonicalJid(raw);
   }
-  if (!/@(s\.whatsapp\.net|lid)$/.test(jid)) return null;
-  return jid.replace(/:\d+@/, "@");
+  return raw.endsWith("@s.whatsapp.net") ? raw : null;
 }
 
-const phoneFromJid = (jid) => jid.split("@")[0].replace(/\D/g, "");
+// Untuk "@lid" angka di depan "@" BUKAN nomor telepon, jadi diberi prefix "lid:"
+// agar tidak tercampur dengan nomor asli di tabel customers.
+const phoneFromJid = (jid) => {
+  const digits = String(jid).split("@")[0].replace(/\D/g, "");
+  if (!digits) return "";
+  return String(jid).endsWith("@lid") ? `lid:${digits}` : digits;
+};
+
+// ------------------------------------------------------------------
+// Mapping LID <-> nomor asli (persisten di DB, tabel lid_map)
+// ------------------------------------------------------------------
+const LID_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS lid_map (
+    lid        text PRIMARY KEY,
+    pn         text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT NOW()
+  )`;
+
+let lidReady = false;
+async function initLidMap(query) {
+  if (lidReady) return;
+  lidReady = true; // coba sekali per proses; gagal -> hanya di-log
+  try {
+    await query(LID_TABLE_SQL);
+    const r = await query("SELECT lid, pn FROM lid_map");
+    for (const row of r?.rows || []) priceFlow.registerLid(row.lid, row.pn);
+    dbg(`lid_map dimuat: ${(r?.rows || []).length} pasangan`);
+  } catch (err) {
+    console.error("⚠️  Gagal memuat lid_map:", err.message);
+  }
+}
+
+async function saveLidMapping(query, lid, pn) {
+  try {
+    await query(
+      `INSERT INTO lid_map (lid, pn) VALUES ($1::text, $2::text)
+       ON CONFLICT (lid) DO UPDATE SET pn = EXCLUDED.pn, updated_at = NOW()`,
+      [lid, pn],
+    );
+    // Customer lama yang tersimpan sebagai "lid:..." -> pindahkan ke nomor asli
+    // (hanya jika nomor asli belum punya baris sendiri; kalau sudah, biarkan).
+    await query(
+      `UPDATE customers SET phone = $2::text, jid = $3::text
+       WHERE phone = $1::text
+         AND NOT EXISTS (SELECT 1 FROM customers c2 WHERE c2.phone = $2::text)`,
+      [phoneFromJid(lid), phoneFromJid(pn), pn],
+    );
+  } catch (err) {
+    console.error("⚠️  Gagal menyimpan mapping LID:", err.message);
+  }
+}
 
 // ------------------------------------------------------------------
 // SQL
@@ -280,6 +338,22 @@ function remember(id) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Antrean per customer: pesan dari JID yang sama diproses satu per satu, juga
+// lintas event messages.upsert. Mencegah dua pesan beruntun sama-sama melihat
+// state lama saat SOP (delay + gambar, ~20 detik) masih berjalan.
+const jidQueues = new Map();
+function enqueue(jid, fn) {
+  const prev = jidQueues.get(jid) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  jidQueues.set(jid, next);
+  next
+    .catch(() => {})
+    .finally(() => {
+      if (jidQueues.get(jid) === next) jidQueues.delete(jid);
+    });
+  return next;
+}
 
 // Jeda + indikator "mengetik..." sebelum bot membalas (pola sama dengan auto-reply)
 async function humanDelay(sock, jid, deps) {
@@ -424,9 +498,11 @@ async function processMessage(sock, msg, deps) {
   );
 
   if (!key) return null;
+  // Pesan keluar (balasan CS dari HP bot / template bot) tidak boleh menyentuh
+  // state SOP maupun timer konsultasi.
   if (key.fromMe) return null;
 
-  const jid = resolveJid(key);
+  const jid = resolveJid(key, (lid, pn) => saveLidMapping(deps.query, lid, pn));
   if (!jid) return null;
 
   if (key.id) {
@@ -446,49 +522,40 @@ async function processMessage(sock, msg, deps) {
 
   // --- 0. Alur konsultatif harga: tahan harga, tanya keluhan dulu ---
   const { STATES } = priceFlow;
-  const normText = normalize(content.text);
   const priceState = priceFlow.getState(jid);
+  const hasPriceWord =
+    Boolean(content.text) && priceFlow.isPriceQuestion(content.text);
   let priceComplaint = false;
 
-  // Jika nomor ini sudah pernah selesai konsultasi, abaikan pertanyaan harga selanjutnya
-  // MENJADI SEPERTI INI:
-  if (
-    priceFlow.hasConsultedWithin24h(jid) &&
-    anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
-  ) {
-    dbg(
-      `Nomor ${phone} sudah konsultasi dalam 24 jam terakhir. Pertanyaan harga diabaikan untuk bot.`,
-    );
-    // Biarkan pesan masuk ke tiket CRM agar dibalas manual oleh CS tanpa gangguan bot
-    // Biarkan pesan masuk ke tiket CRM agar dibalas manual oleh CS tanpa gangguan bot
+  if (priceFlow.hasConsultedWithin24h(jid)) {
+    // Sudah konsultasi <24 jam: SOP (tanya keluhan & kirim solusi) tidak boleh
+    // jalan lagi, apa pun isi pesannya (lokasi, harga, dll). Lanjut ke
+    // auto-reply/tiket supaya CS yang menangani.
+    dbg(`Nomor ${phone} sudah konsultasi <24 jam, SOP dilewati.`);
   } else if (
     priceState === STATES.WAITING_FOR_COMPLAINT &&
     (content.text || content.label)
   ) {
-    const justAskingAgain =
-      content.text &&
-      !content.hasAttachment &&
-      normText.split(" ").length <= 4 &&
-      anyPhrase(normText, priceFlow.PRICE_KEYWORDS);
-    if (justAskingAgain) {
+    const looksLikeComplaint =
+      content.hasAttachment || // foto wajah
+      !content.text || // pesan suara
+      priceFlow.isComplaint(content.text);
+
+    if (hasPriceWord && !looksLikeComplaint) {
+      // Masih tanya harga/produk, bukan keluhan -> ulangi pertanyaan SOP
       priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
       await humanDelay(sock, jid, deps);
       await deps.send(jid, priceFlow.ASK_COMPLAINT_TEXT);
       return { action: "price_gate_repeat" };
     }
 
-    // Keluhan diterima -> Kirim SOP 1-3, lalu SET STATE KE 'DONE' agar tidak terulang lagi
-    // MENJADI INI:
+    // Keluhan diterima -> state & cooldown diset SEBELUM kirim (await)
     priceFlow.setConsultedNow(jid);
     priceFlow.setState(jid, STATES.IDLE);
     await replyConsultative(sock, jid, phone, deps, content.text);
     priceComplaint = true;
-  } else if (
-    priceState === STATES.IDLE &&
-    content.text &&
-    anyPhrase(normText, priceFlow.PRICE_KEYWORDS)
-  ) {
-    // Pertanyaan harga pertama -> Tahan, minta keluhan
+  } else if (priceState === STATES.IDLE && hasPriceWord) {
+    // Pertanyaan harga pertama -> tahan, minta keluhan
     priceFlow.setState(jid, STATES.WAITING_FOR_COMPLAINT);
     try {
       await humanDelay(sock, jid, deps);
@@ -504,7 +571,7 @@ async function processMessage(sock, msg, deps) {
     content.text &&
     priceFlow.isComplaint(content.text)
   ) {
-    // Keluhan langsung tanpa ditanya -> Kirim SOP, lalu set state ke 'DONE'
+    // Keluhan langsung tanpa ditanya -> kirim SOP
     priceFlow.setConsultedNow(jid);
     priceFlow.setState(jid, STATES.IDLE);
     await replyConsultative(sock, jid, phone, deps, content.text);
@@ -631,9 +698,14 @@ async function handleUpsert(sock, upsert, deps = {}) {
     deps.sendSteps ||
     ((jid, complaint) => sendConsultativeSteps(sock, jid, d.sleep, complaint));
 
+  await initLidMap(d.query);
+
   for (const msg of upsert.messages || []) {
     try {
-      await processMessage(sock, msg, d);
+      const jid =
+        resolveJid(msg.key, (lid, pn) => saveLidMapping(d.query, lid, pn)) ||
+        "unknown";
+      await enqueue(jid, () => processMessage(sock, msg, d));
     } catch (err) {
       console.error("❌ Gagal memproses pesan masuk:", err.message);
     }
@@ -649,6 +721,7 @@ module.exports = {
   renderTemplate,
   extractContent,
   resolveJid,
+  phoneFromJid,
   handleUpsert,
   sendConsultativeSteps,
 };

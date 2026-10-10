@@ -10,7 +10,14 @@ const STATES = Object.freeze({
 });
 
 // Dicocokkan di AWAL KATA, jadi "harganya" dan "berapaan" ikut terdeteksi.
-const PRICE_KEYWORDS = ["harga", "biaya", "pricelist", "price list", "berapa"];
+const PRICE_KEYWORDS = [
+  "harga",
+  "biaya",
+  "pricelist",
+  "price list",
+  "berapa",
+  "brp",
+];
 
 // Kata keluhan (juga di AWAL KATA). Tambah kata baru di sini bila perlu.
 const COMPLAINT_KEYWORDS = [
@@ -20,6 +27,11 @@ const COMPLAINT_KEYWORDS = [
   "kering",
   "merata",
   "glowing",
+  "kusam",
+  "belang",
+  "komedo",
+  "bruntusan",
+  "noda",
 ];
 
 // Pilihan menu angka 1-6: hanya dianggap keluhan jika pesannya cuma angka itu
@@ -82,18 +94,25 @@ const STEP3_TESTI_CAPTION =
 // Dipakai hanya jika tidak ada template harga di dashboard
 
 // ---------- Pencocokan kata kunci ----------
-function buildStartOfWordRegex(keywords) {
-  const parts = keywords.map((k) =>
-    k
-      .trim()
-      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-      .replace(/\s+/g, "\\s+"),
+function buildStartOfWordRegex(keywords, suffixes = {}) {
+  const parts = keywords.map(
+    (k) =>
+      k
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/\s+/g, "\\s+") + (suffixes[k] || ""),
   );
   // Awal kata: didahului awal teks atau karakter non huruf/angka
   return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join("|")})`, "iu");
 }
 
-const PRICE_RE = buildStartOfWordRegex(PRICE_KEYWORDS);
+// "berapa lama / berapa kali / berapa hari ..." BUKAN pertanyaan harga
+const NOT_DURATION =
+  "(?!\\s+(?:lama|hari|kali|x|jam|menit|minggu|bulan|tahun|banyak|umur|usia)\\b)";
+
+const PRICE_RE = buildStartOfWordRegex(PRICE_KEYWORDS, {
+  berapa: NOT_DURATION,
+});
 const COMPLAINT_RE = buildStartOfWordRegex(COMPLAINT_KEYWORDS);
 
 function isPriceQuestion(text) {
@@ -105,35 +124,93 @@ function isComplaint(text) {
   return COMPLAINT_CHOICE_RE.test(t) || COMPLAINT_RE.test(t);
 }
 
-// ---------- State ----------
-const store = new Map(); // jid -> { state, at }
+// ---------- Kunci JID (SATU PINTU) ----------
+// Semua Map di bawah memakai canonicalJid() sebagai key. Jangan pernah memakai
+// remoteJid mentah sebagai key: "123@lid" dan "62812...@s.whatsapp.net" bisa
+// orang yang sama (HP vs WhatsApp Web).
+const store = new Map(); // key -> { state, at }
+const lastConsultedMap = new Map(); // key -> timestamp
+const COOLDOWN_24H_MS = 24 * 60 * 60 * 1000;
+const lidToPn = new Map(); // "123@lid" -> "62812...@s.whatsapp.net"
 
+const stripDevice = (jid) =>
+  String(jid || "")
+    .trim()
+    .replace(/:\d+@/, "@");
+
+function canonicalJid(jid) {
+  const j = stripDevice(jid);
+  if (!j) return "";
+  return j.endsWith("@lid") ? lidToPn.get(j) || j : j;
+}
+
+// Catat pasangan LID <-> nomor asli. Return true jika mapping baru/berubah.
+// State & cooldown yang sudah tersimpan atas nama LID ikut dipindah ke nomor asli.
+function registerLid(lid, pn) {
+  const l = stripDevice(lid);
+  const p = stripDevice(pn);
+  if (!l.endsWith("@lid") || !p.endsWith("@s.whatsapp.net")) return false;
+  if (lidToPn.get(l) === p) return false;
+  lidToPn.set(l, p);
+
+  const e = store.get(l);
+  if (e) {
+    const cur = store.get(p);
+    if (!cur || e.at > cur.at) store.set(p, e);
+    store.delete(l);
+  }
+  const t = lastConsultedMap.get(l);
+  if (t) {
+    lastConsultedMap.set(p, Math.max(t, lastConsultedMap.get(p) || 0));
+    lastConsultedMap.delete(l);
+  }
+  return true;
+}
+
+// ---------- State ----------
 function getState(jid) {
-  const e = store.get(jid);
+  const k = canonicalJid(jid);
+  if (!k) return STATES.IDLE;
+  const e = store.get(k);
   if (!e) return STATES.IDLE;
   if (Date.now() - e.at > STATE_TTL_MS) {
-    store.delete(jid);
+    store.delete(k);
     return STATES.IDLE;
   }
   return e.state;
 }
 
 function setState(jid, state) {
-  if (state === STATES.IDLE) store.delete(jid);
-  else store.set(jid, { state, at: Date.now() });
+  const k = canonicalJid(jid);
+  if (!k) return;
+  if (state === STATES.IDLE) store.delete(k);
+  else store.set(k, { state, at: Date.now() });
 }
-const lastConsultedMap = new Map();
-const COOLDOWN_24H_MS = 24 * 60 * 60 * 1000;
 
 function setConsultedNow(jid) {
-  lastConsultedMap.set(jid, Date.now());
+  const k = canonicalJid(jid);
+  if (k) lastConsultedMap.set(k, Date.now());
 }
 
 function hasConsultedWithin24h(jid) {
-  const lastTime = lastConsultedMap.get(jid);
+  const k = canonicalJid(jid);
+  if (!k) return false;
+  const lastTime = lastConsultedMap.get(k);
   if (!lastTime) return false;
   return Date.now() - lastTime < COOLDOWN_24H_MS;
 }
+
+// Bersihkan entri kadaluarsa supaya Map tidak membengkak
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [k, e] of store) if (now - e.at > STATE_TTL_MS) store.delete(k);
+    for (const [k, t] of lastConsultedMap)
+      if (now - t > COOLDOWN_24H_MS) lastConsultedMap.delete(k);
+  },
+  10 * 60 * 1000,
+).unref();
+
 module.exports = {
   STATES,
   PRICE_KEYWORDS,
@@ -159,6 +236,12 @@ module.exports = {
 
   isPriceQuestion,
   isComplaint,
+
+  // Kunci JID (satu pintu)
+  stripDevice,
+  canonicalJid,
+  registerLid,
+
   getState,
   setState,
 
