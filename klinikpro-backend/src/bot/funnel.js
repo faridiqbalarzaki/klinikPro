@@ -6,6 +6,7 @@ const { botStages: T, csCommands, priceFlow: PT } = require("./templates");
 const state = require("./state");
 const cfg = require("./config");
 const { normalizeJid } = require("./jid");
+const intentParser = require("./intentParser");
 
 const ASSET_DIR =
   process.env.ASSET_DIR || path.join(__dirname, "..", "..", "assets");
@@ -174,6 +175,20 @@ async function deliver({ jid, steps, commit, rollback }) {
 const isPriceAsk = (text) =>
   priceFlow.isPriceQuestion(text) || /\bprice\b/i.test(text);
 
+// ------------------------------------------------------------------
+// Jembatan ke AI Intent Parser (ctx.nlu dari index.js)
+// ------------------------------------------------------------------
+// Aturan lokal selalu jalan lebih dulu pada teks asli DAN teks hasil normalisasi slang
+// (nlu.normalized: "pket"->"paket", "pelek"->"flek"; deterministik, bukan buatan AI).
+// Hasil AI hanya MENAMBAH sinyal (intent / entity tervalidasi, keyakinan >= ambang);
+// tidak ada teks AI yang dikirim ke customer dan keputusan bisnis tetap di bawah.
+const textsOf = (text, nlu) =>
+  nlu?.normalized && nlu.normalized !== priceFlow.normalizeText(text)
+    ? [text, nlu.normalized]
+    : [text];
+const aiHas = (nlu, intent) =>
+  intentParser.isTrusted(nlu) && nlu.intents.includes(intent);
+
 // Sapaan / basa-basi / tawa / partikel: bukan keluhan, bukan kecamatan, bukan pilihan paket.
 const FILLER = new Set([
   "p",
@@ -306,28 +321,54 @@ const CHOICE_DIGIT_RE = /(?:^| )[1-3](?: |$)/;
 // "ok"      = jawaban masuk akal untuk stage ini -> lanjut alur
 // "reask"   = bukan jawaban (sapaan/tawa/ngawur/emoji) -> tanya ulang, stage tetap
 // "catalog" = (stage 3) customer minta harga lagi, bukan memesan -> kirim ulang katalog
-function judgeReply(stage, text) {
-  const price = isPriceAsk(text);
+function judgeReply(stage, text, nlu = null) {
+  const texts = textsOf(text, nlu);
+  const ai = intentParser.isTrusted(nlu) ? nlu : null;
+  const maxWords = (affirm) =>
+    Math.max(...texts.map((t) => contentWords(t, affirm).length));
+  const price = texts.some(isPriceAsk) || aiHas(nlu, "PRICE_INQUIRY");
+
+  // AI yakin pesan ini HANYA sapaan ("mikum", "p", "permisi") -> bukan jawaban.
+  // (Veto ini hanya boleh MENAHAN kemajuan stage; paling buruk bot bertanya ulang,
+  // dan setelah MAX_REASKS diserahkan ke CS.)
+  const greetOnly =
+    !!ai &&
+    ai.intents.length === 1 &&
+    ai.intents[0] === "GREETING" &&
+    !ai.entities.complaint &&
+    !ai.entities.kecamatan;
+  if (greetOnly && !price) return "reask";
+
   if (stage === 1) {
     // Menunggu keluhan
-    if (priceFlow.isComplaint(text)) return "ok"; // kata keluhan / angka menu 1-6
-    if (!price && contentWords(text).length >= 2) return "ok";
+    if (
+      texts.some((t) => priceFlow.isComplaint(t)) || // kata keluhan / angka menu 1-6
+      aiHas(nlu, "COMPLAINT") ||
+      ai?.entities.complaint
+    )
+      return "ok";
+    if (!price && maxWords(false) >= 2) return "ok";
     return "reask";
   }
   if (stage === 2) {
     // Menunggu kecamatan; minta harga = jawaban untuk katalog
     if (price) return "ok";
-    return contentWords(text).length >= 1 ? "ok" : "reask";
+    if (aiHas(nlu, "KECAMATAN") || ai?.entities.kecamatan) return "ok";
+    return maxWords(false) >= 1 ? "ok" : "reask";
   }
   if (stage === 3) {
     // Menunggu pilihan paket
-    const norm = priceFlow.normalizeText(text);
-    const wantsOrder = ORDER_INTENT_RE.test(norm);
+    const norms = texts.map((t) => priceFlow.normalizeText(t));
+    const wantsOrder =
+      norms.some((n) => ORDER_INTENT_RE.test(n)) ||
+      aiHas(nlu, "ORDER_INTENT") ||
+      !!ai?.entities.package;
     if (price && !wantsOrder) return "catalog";
     if (
       wantsOrder ||
-      CHOICE_DIGIT_RE.test(norm) ||
-      contentWords(text, true).length >= 1
+      aiHas(nlu, "AFFIRM") ||
+      norms.some((n) => CHOICE_DIGIT_RE.test(n)) ||
+      maxWords(true) >= 1
     )
       return "ok";
     return "reask";
@@ -341,6 +382,7 @@ function judgeReply(stage, text) {
  *                 sebelumnya untuk jid yang sama masih berjalan/antre, atau
  *                 sesaat setelah bot selesai membalas.
  *  - stageAtOpen: stage yang terbaca saat bubble pertama buffer masuk.
+ *  - nlu:         hasil intentParser.parse() (AI atau fallback lokal); opsional.
  * Return: "replied" | "silent" | "ignored" | "absorbed"
  */
 async function process_({ sender, msg, jid, text, ctx = {} }) {
@@ -359,7 +401,6 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
 
   priceFlow.setConsultedNow(jid);
 
-  const lowerText = text.toLowerCase();
   const stage = session.funnel_stage;
   const patch = (p) => state.updateSession(jid, { phoneNumber: phone, ...p });
 
@@ -386,15 +427,30 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
 
   // --- CEGAT PENOLAKAN (AUTO-OBJECTION HANDLING) ---
   // Tetap aktif untuk semua pesan, termasuk bubble susulan.
-  if (HANDOFF_REGEX.test(lowerText)) {
+  // Regex lokal dicek pada teks asli + teks ter-normalisasi slang. AI (OBJECTION) hanya
+  // menambah penangkapan untuk gaya bahasa yang lolos regex; template yang dikirim
+  // tetap template SOP milik kita.
+  const nlu = ctx.nlu || null;
+  const texts = textsOf(text, nlu);
+  const lowers = texts.map((t) => t.toLowerCase());
+  const aiObjection = aiHas(nlu, "OBJECTION");
+  if (lowers.some((l) => HANDOFF_REGEX.test(l)) || aiObjection) {
     let replyTemplate = null;
-    if (/mahal|kemahalan|uang/i.test(lowerText))
-      replyTemplate = csCommands.mahal;
-    else if (/suami|paksu/i.test(lowerText)) replyTemplate = csCommands.paksu;
-    else if (/nanti|besok|kapan/i.test(lowerText))
-      replyTemplate = csCommands.nanti;
-    else if (/ragu|takut|efek/i.test(lowerText))
-      replyTemplate = csCommands.ragu;
+    const lt = (re) => lowers.some((l) => re.test(l));
+    if (lt(/mahal|kemahalan|uang/i)) replyTemplate = csCommands.mahal;
+    else if (lt(/suami|paksu/i)) replyTemplate = csCommands.paksu;
+    else if (lt(/nanti|besok|kapan/i)) replyTemplate = csCommands.nanti;
+    else if (lt(/ragu|takut|efek/i)) replyTemplate = csCommands.ragu;
+    else if (aiObjection) {
+      // Tidak ada kata kunci lokal: pakai klasifikasi AI -> template yang sama
+      replyTemplate =
+        {
+          mahal: csCommands.mahal,
+          paksu: csCommands.paksu,
+          nanti: csCommands.nanti,
+          ragu: csCommands.ragu,
+        }[nlu.entities.objection_type] || null; // batal/lainnya -> handoff tanpa template
+    }
 
     if (replyTemplate) {
       await deliver({
@@ -434,7 +490,8 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
   // --- CEGAT KATA KUNCI "HARGA" (PRICE FLOW) ---
   // Stage 0: tahan harga, tanyakan keluhan dulu. (Stage 1 ditangani penilai jawaban
   // di bawah; mode lama FUNNEL_STRICT_REPLY=false tetap memakai cegat ini.)
-  if ((stage === 0 || (!STRICT && stage === 1)) && isPriceAsk(text)) {
+  const priceAsk = texts.some(isPriceAsk) || aiHas(nlu, "PRICE_INQUIRY");
+  if ((stage === 0 || (!STRICT && stage === 1)) && priceAsk) {
     const r = await deliver({
       jid,
       steps: [say(PT.askComplaint, 1500)],
@@ -447,7 +504,7 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
 
   // --- PENILAI JAWABAN: CHAT NGAWUR / DI LUAR ALUR ---
   if (STRICT && stage >= 1 && stage <= 3) {
-    const verdict = judgeReply(stage, text);
+    const verdict = judgeReply(stage, text, nlu);
     if (verdict === "reask" || verdict === "catalog") {
       const n = bumpReask(jid, `${stage}:${verdict}`);
       const limit = verdict === "catalog" ? MAX_CATALOG_RESEND : MAX_REASKS;
@@ -556,4 +613,5 @@ module.exports = {
   markTakeover,
   isTakenOver,
   HANDOFF_REGEX,
+  judgeReply, // diekspor untuk pengujian
 };

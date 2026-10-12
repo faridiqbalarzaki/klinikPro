@@ -22,7 +22,8 @@ const cfg = {
   // Debounce: pesan beruntun dari satu nomor digabung, bot membalas SEKALI setelah jeda ini
   DEBOUNCE_MS: Number(process.env.FUNNEL_DEBOUNCE_MS) || 3500,
   // Batas tunggu total: customer yang mengetik terus-menerus tetap dibalas setelah selama ini
-  DEBOUNCE_MAX_WAIT_MS: Number(process.env.FUNNEL_DEBOUNCE_MAX_WAIT_MS) || 15000,
+  DEBOUNCE_MAX_WAIT_MS:
+    Number(process.env.FUNNEL_DEBOUNCE_MAX_WAIT_MS) || 15000,
 
   // Status HANDOFF = bot 100% diam. Pesan customer HANDOFF tetap diteruskan ke inbox.js
   // HANYA untuk dicatat sebagai tiket (tanpa auto-reply / SOP harga / konsultatif).
@@ -44,6 +45,23 @@ const cfg = {
   STUCK_MAX_AGE_MIN: Number(process.env.STUCK_MAX_AGE_MIN) || 360,
   STUCK_CHECK_MS: 60 * 1000,
   STUCK_BATCH: 3, // maks. dikirim per pengecekan (jeda antar kirim 4-8 detik)
+
+  // AI Intent Parser (Gemini Flash). Kosongkan GEMINI_API_KEY / set AI_PARSER_ENABLED=false
+  // untuk mematikan; bot otomatis memakai regex lokal saja.
+  AI_API_KEY: process.env.GEMINI_API_KEY || "",
+  AI_ENABLED:
+    process.env.AI_PARSER_ENABLED !== "false" && !!process.env.GEMINI_API_KEY,
+  AI_MODEL: process.env.GEMINI_MODEL || "gemini-2.5-flash-lite",
+  AI_TIMEOUT_MS: Number(process.env.AI_TIMEOUT_MS) || 2500,
+  // Keyakinan minimum agar hasil AI dipakai funnel (di bawah ini -> hanya aturan lokal)
+  AI_MIN_CONFIDENCE: Number(process.env.AI_MIN_CONFIDENCE) || 0.7,
+  AI_MAX_CONCURRENT: Number(process.env.AI_MAX_CONCURRENT) || 5,
+  // Circuit breaker: sekian kali gagal beruntun -> lewati AI selama cooldown
+  AI_CIRCUIT_FAILS: 3,
+  AI_CIRCUIT_COOLDOWN_MS: 60 * 1000,
+  AI_CACHE_SIZE: 500,
+  AI_CACHE_TTL_MS: 10 * 60 * 1000,
+  AI_MAX_INPUT_CHARS: 600,
 };
 
 // Jeda dasar + acak 0..GAP_JITTER_MS (pola kirim tidak seragam = tidak terlihat seperti robot)

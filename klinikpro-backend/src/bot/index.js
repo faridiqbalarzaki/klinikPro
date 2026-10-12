@@ -4,6 +4,7 @@ const inbox = require("../inbox");
 const priceFlow = require("../priceFlow");
 const { createSender, sleep, withTimeout } = require("./sender");
 const funnel = require("./funnel");
+const intentParser = require("./intentParser");
 const commands = require("./commands");
 const state = require("./state");
 const cfg = require("./config");
@@ -199,13 +200,26 @@ async function flush(jid) {
       }
     }
 
+    // --- AI INTENT PARSER (hybrid) ---
+    // Sekali per giliran, pada teks gabungan semua bubble. Hanya untuk sesi BOT (sesi
+    // HANDOFF memang tidak dibalas). parse() tidak pernah melempar error: kalau Gemini
+    // gagal / timeout hasilnya otomatis dari aturan lokal (nlu.source === "local").
+    let nlu = null;
+    if (session && session.status === "BOT") {
+      nlu = await intentParser.parse(text, { stage: session.funnel_stage });
+      console.log(
+        `🧠 [NLU] ${nlu.source} ${nlu.intents.join("+")} (${nlu.confidence.toFixed(2)}, ${nlu.latencyMs}ms)` +
+          (nlu.fallbackReason ? ` fallback: ${nlu.fallbackReason}` : ""),
+      );
+    }
+
     const r = await enqueue(jid, () =>
       funnel.process({
         sender,
         msg: b.last,
         jid,
         text,
-        ctx: { late: b.late, stageAtOpen: b.stageAtOpen },
+        ctx: { late: b.late, stageAtOpen: b.stageAtOpen, nlu },
       }),
     );
 
