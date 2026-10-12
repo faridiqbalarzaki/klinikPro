@@ -14,6 +14,17 @@ const ASSET_DIR =
 const HANDOFF_REGEX =
   /\b(gajian|suami|batal|cancel|mahal|nanti|kemahalan|uang|paksu|ragu|takut)\b/i;
 
+// Validasi jawaban customer di stage 1-3 (anti chat ngawur / di luar alur).
+// FUNNEL_STRICT_REPLY=false -> perilaku lama: balasan apa pun memajukan stage.
+const STRICT = process.env.FUNNEL_STRICT_REPLY !== "false";
+// Batas bot bertanya ulang pada stage yang sama sebelum diserahkan ke CS
+// (sama dengan batas SOP harga di priceFlow.js / inbox.js).
+const MAX_REASKS = Number.isFinite(priceFlow.MAX_REASKS)
+  ? priceFlow.MAX_REASKS
+  : 2;
+const MAX_CATALOG_RESEND = 1; // katalog dikirim ulang maks. sekali di stage 3
+const REASK_TTL_MS = 30 * 60 * 1000; // hitungan tanya-ulang kedaluwarsa setelah 30 menit
+
 async function isKnownCustomer(phone, jid) {
   jid = normalizeJid(jid);
   const r = await db.query(
@@ -99,8 +110,33 @@ function markTakeover(jid) {
 const isTakenOver = (jid) =>
   Date.now() - (takeoverAt.get(jid) || 0) < TAKEOVER_WINDOW_MS;
 
+// Mencatat apakah giliran (turn) terakhir untuk jid ini benar-benar membalas.
+// Direset (replied=false) di awal setiap giliran yang diproses, jadi giliran yang
+// gagal / tidak membalas tidak meninggalkan status "sudah membalas" yang basi.
+const lastTurn = new Map();
+function markTurn(jid, replied) {
+  if (lastTurn.size > 5000) lastTurn.clear();
+  lastTurn.set(jid, { replied: !!replied, at: Date.now() });
+}
+
+// Hitungan "bot bertanya ulang" per customer, dipisah per jenis (stage:verdict) supaya
+// tanya-ulang biasa dan kirim-ulang katalog tidak saling menghabiskan jatah.
+const reasks = new Map();
+function bumpReask(jid, kind) {
+  if (reasks.size > 5000) reasks.clear();
+  const now = Date.now();
+  let e = reasks.get(jid);
+  if (!e || now - e.at > REASK_TTL_MS) e = { at: now, counts: {} };
+  e.at = now;
+  e.counts[kind] = (e.counts[kind] || 0) + 1;
+  reasks.set(jid, e);
+  return e.counts[kind];
+}
+
 async function deliver({ jid, steps, commit, rollback }) {
   if (isTakenOver(jid)) return "taken";
+
+  // INSTANT STAGE LOCK: stage di-commit ke DB SEBELUM sleep/typing/kirim pesan.
   await commit();
 
   for (let i = 0; i < steps.length; i++) {
@@ -130,12 +166,192 @@ async function deliver({ jid, steps, commit, rollback }) {
   return "replied";
 }
 
-async function process_({ sender, msg, jid, text }) {
+// ------------------------------------------------------------------
+// Penilai jawaban customer (hanya heuristik ringan, tanpa AI)
+// ------------------------------------------------------------------
+// Pertanyaan harga: pencocok priceFlow (per kata; "berapa lama/hari/kali" bukan harga)
+// + kata "price" yang sebelumnya ada di regex lama.
+const isPriceAsk = (text) =>
+  priceFlow.isPriceQuestion(text) || /\bprice\b/i.test(text);
+
+// Sapaan / basa-basi / tawa / partikel: bukan keluhan, bukan kecamatan, bukan pilihan paket.
+const FILLER = new Set([
+  "p",
+  "pp",
+  "ping",
+  "test",
+  "tes",
+  "halo",
+  "hallo",
+  "hai",
+  "hi",
+  "hy",
+  "hello",
+  "hey",
+  "assalamualaikum",
+  "assalamu",
+  "alaikum",
+  "waalaikumsalam",
+  "salam",
+  "selamat",
+  "pagi",
+  "siang",
+  "sore",
+  "malam",
+  "kak",
+  "kakak",
+  "ka",
+  "kk",
+  "kaka",
+  "min",
+  "admin",
+  "permisi",
+  "hmm",
+  "hm",
+  "mm",
+  "oh",
+  "ooh",
+  "ohh",
+  "lol",
+  "thx",
+  "thanks",
+  "makasih",
+  "terima",
+  "kasih",
+  "trims",
+  "dong",
+  "deh",
+  "sih",
+  "nih",
+  "tuh",
+  "aja",
+  "lah",
+  "kok",
+  "tanya",
+  "nanya",
+  "bun",
+  "bunda",
+  "mba",
+  "mbak",
+  "mas",
+  "bu",
+  "ibu",
+  "pak",
+  "bapak",
+  "sis",
+  "gan",
+  "kan",
+  "ini",
+  "itu",
+  "yang",
+  "dan",
+  "di",
+  "ke",
+]);
+// Kata setuju: BUKAN jawaban untuk keluhan / kecamatan, tapi jawaban sah untuk
+// pertanyaan pilihan paket di stage 3 ("mau", "oke", "boleh").
+const AFFIRM = new Set([
+  "ok",
+  "oke",
+  "okey",
+  "okay",
+  "sip",
+  "siap",
+  "ya",
+  "iya",
+  "yaa",
+  "yes",
+  "yup",
+  "mau",
+  "boleh",
+  "bisa",
+  "jadi",
+  "lanjut",
+  "setuju",
+  "gas",
+]);
+
+const tokensOf = (text) =>
+  priceFlow.normalizeText(text).split(" ").filter(Boolean);
+
+const LAUGH_RE = /^(?:(?:wk)+w?k*|(?:ha|he|hi|ho|xi)+h?|(?:kw)+k?)$/;
+// Pola ketukan keyboard asal (baris QWERTY) yang paling sering dipakai iseng
+const KEYMASH_RE =
+  /asdf|sdfg|dfgh|fghj|ghjk|hjkl|qwer|wert|erty|rtyu|tyui|yuio|uiop|zxcv|xcvb|cvbn|vbnm|qaz|wsx/;
+function isGibberishToken(t) {
+  if (!/\p{L}/u.test(t)) return false;
+  return (
+    /(.)\1{3,}/u.test(t) || // aaaaa, hahahahaha
+    LAUGH_RE.test(t) || // wkwkwk, hahaha, hehe
+    KEYMASH_RE.test(t) || // asdfg, qwerty, zxcvb
+    /[^aeiou\d]{5,}/.test(t) // 5+ konsonan beruntun
+  );
+}
+
+// Kata bermakna: bukan sapaan/tawa/ngawur (dan bukan kata setuju, kecuali diminta).
+function contentWords(text, affirmIsContent = false) {
+  return tokensOf(text).filter(
+    (t) =>
+      /\p{L}{2,}/u.test(t) &&
+      !FILLER.has(t) &&
+      (affirmIsContent || !AFFIRM.has(t)) &&
+      !isGibberishToken(t),
+  );
+}
+
+const ORDER_INTENT_RE =
+  /(?:^| )(?:ambil|pesan|order|beli|jadi|lanjut|cod|transfer)(?: |$)/;
+const CHOICE_DIGIT_RE = /(?:^| )[1-3](?: |$)/;
+
+// "ok"      = jawaban masuk akal untuk stage ini -> lanjut alur
+// "reask"   = bukan jawaban (sapaan/tawa/ngawur/emoji) -> tanya ulang, stage tetap
+// "catalog" = (stage 3) customer minta harga lagi, bukan memesan -> kirim ulang katalog
+function judgeReply(stage, text) {
+  const price = isPriceAsk(text);
+  if (stage === 1) {
+    // Menunggu keluhan
+    if (priceFlow.isComplaint(text)) return "ok"; // kata keluhan / angka menu 1-6
+    if (!price && contentWords(text).length >= 2) return "ok";
+    return "reask";
+  }
+  if (stage === 2) {
+    // Menunggu kecamatan; minta harga = jawaban untuk katalog
+    if (price) return "ok";
+    return contentWords(text).length >= 1 ? "ok" : "reask";
+  }
+  if (stage === 3) {
+    // Menunggu pilihan paket
+    const norm = priceFlow.normalizeText(text);
+    const wantsOrder = ORDER_INTENT_RE.test(norm);
+    if (price && !wantsOrder) return "catalog";
+    if (
+      wantsOrder ||
+      CHOICE_DIGIT_RE.test(norm) ||
+      contentWords(text, true).length >= 1
+    )
+      return "ok";
+    return "reask";
+  }
+  return "ok";
+}
+
+/**
+ * ctx (opsional, diisi oleh index.js):
+ *  - late:        true jika buffer ini mulai terkumpul saat proses funnel
+ *                 sebelumnya untuk jid yang sama masih berjalan/antre, atau
+ *                 sesaat setelah bot selesai membalas.
+ *  - stageAtOpen: stage yang terbaca saat bubble pertama buffer masuk.
+ * Return: "replied" | "silent" | "ignored" | "absorbed"
+ */
+async function process_({ sender, msg, jid, text, ctx = {} }) {
   jid = normalizeJid(jid);
 
   if (!text || !String(text).trim()) return "ignored";
 
   const phone = inbox.phoneFromJid(jid);
+
+  // VALIDASI ULANG: baca stage terbaru dari DB di dalam antrean (serial per jid),
+  // setelah semua bubble digabung. Ini selalu stage paling mutakhir.
   const session = await state.getSession(jid);
   if (!session) return "silent";
 
@@ -147,22 +363,29 @@ async function process_({ sender, msg, jid, text }) {
   const stage = session.funnel_stage;
   const patch = (p) => state.updateSession(jid, { phoneNumber: phone, ...p });
 
+  // Setiap langkah mengecek ulang takeover CS SESUDAH jeda, tepat sebelum kirim:
+  // CS bisa mengambil alih saat bot sedang "tidur" / "mengetik".
   const say =
     (t, wait = 0) =>
     async () => {
       if (wait) await sender.sleep(cfg.gap(wait));
+      if (isTakenOver(jid)) return;
       await sender.typing(jid);
+      if (isTakenOver(jid)) return;
       await sender.sendText(jid, t);
     };
   const pic =
     (file, caption, wait = 0) =>
     async () => {
       if (wait) await sender.sleep(cfg.gap(wait));
+      if (isTakenOver(jid)) return;
       await sender.typing(jid);
+      if (isTakenOver(jid)) return;
       await sender.sendImage(jid, file, caption);
     };
 
   // --- CEGAT PENOLAKAN (AUTO-OBJECTION HANDLING) ---
+  // Tetap aktif untuk semua pesan, termasuk bubble susulan.
   if (HANDOFF_REGEX.test(lowerText)) {
     let replyTemplate = null;
     if (/mahal|kemahalan|uang/i.test(lowerText))
@@ -189,18 +412,81 @@ async function process_({ sender, msg, jid, text }) {
     return "silent";
   }
 
+  // --- STRICT STAGE VALIDATION: SERAP BUBBLE SUSULAN ---
+  // Bubble susulan = diketik customer saat bot masih memproses/mengetik balasan
+  // untuk bubble sebelumnya. Jangan majukan stage / picu harga / katalog lagi.
+  const stageMoved =
+    typeof ctx.stageAtOpen === "number" && stage > ctx.stageAtOpen;
+  const botJustReplied =
+    ctx.late === true && lastTurn.get(jid)?.replied === true;
+  if (stageMoved || botJustReplied) {
+    console.log(
+      `🧩 [Bot] ${phone}: bubble susulan diserap (stage ${stage}, open=${ctx.stageAtOpen ?? "-"}): "${text.slice(0, 60)}"`,
+    );
+    return "absorbed";
+  }
+
+  // Dari sini giliran ini diproses sungguhan. Status "sudah membalas" direset dulu;
+  // baru jadi true jika balasan benar-benar terkirim (jadi giliran yang gagal tidak
+  // membuat bubble susulan berikutnya ikut diserap).
+  markTurn(jid, false);
+
   // --- CEGAT KATA KUNCI "HARGA" (PRICE FLOW) ---
-  if (
-    (stage === 0 || stage === 1) &&
-    /harga|berapa|pricelist|price/i.test(lowerText)
-  ) {
-    await deliver({
+  // Stage 0: tahan harga, tanyakan keluhan dulu. (Stage 1 ditangani penilai jawaban
+  // di bawah; mode lama FUNNEL_STRICT_REPLY=false tetap memakai cegat ini.)
+  if ((stage === 0 || (!STRICT && stage === 1)) && isPriceAsk(text)) {
+    const r = await deliver({
       jid,
       steps: [say(PT.askComplaint, 1500)],
       commit: () => patch({ funnel_stage: 1 }),
       rollback: () => patch({ funnel_stage: stage }),
     });
-    return "replied";
+    markTurn(jid, r === "replied");
+    return r === "taken" ? "silent" : "replied";
+  }
+
+  // --- PENILAI JAWABAN: CHAT NGAWUR / DI LUAR ALUR ---
+  if (STRICT && stage >= 1 && stage <= 3) {
+    const verdict = judgeReply(stage, text);
+    if (verdict === "reask" || verdict === "catalog") {
+      const n = bumpReask(jid, `${stage}:${verdict}`);
+      const limit = verdict === "catalog" ? MAX_CATALOG_RESEND : MAX_REASKS;
+      if (n <= limit) {
+        const reaskText = {
+          1: PT.askComplaint,
+          2: T.kecamatan,
+          3: T.harga_tanya,
+        };
+        const steps =
+          verdict === "catalog"
+            ? [
+                pic("HARGA PROMO.jpeg", T.harga_katalog),
+                say(T.harga_tanya, cfg.DELAY_BETWEEN_MS),
+              ]
+            : [say(reaskText[stage], 1500)];
+        console.log(
+          `🔁 [Bot] ${phone}: ${verdict} di stage ${stage} (${n}/${limit}): "${text.slice(0, 60)}"`,
+        );
+        const r = await deliver({
+          jid,
+          steps,
+          // stage tetap; commit hanya memperbarui updated_at (timer anti-ghosting)
+          commit: () => patch({ funnel_stage: stage }),
+          rollback: async () => {},
+        });
+        markTurn(jid, r === "replied");
+        return r === "taken" ? "silent" : "replied";
+      }
+      if (verdict === "reask") {
+        // Sudah ditanya ulang melebihi batas: serahkan ke CS (tiket dibuat lewat forward silent)
+        await patch({ status: "HANDOFF" });
+        console.log(
+          `🙋 [Bot] ${phone} HANDOFF (jawaban di luar alur ${n - 1}x): "${text.slice(0, 60)}"`,
+        );
+        return "silent";
+      }
+      // verdict "catalog" melewati batas kirim ulang: lanjut ke alur normal (form order)
+    }
   }
 
   let result;
@@ -259,6 +545,8 @@ async function process_({ sender, msg, jid, text }) {
       return "silent";
   }
 
+  if (result === "replied") reasks.delete(jid); // stage maju: hitungan tanya-ulang direset
+  markTurn(jid, result === "replied");
   return result === "taken" ? "silent" : "replied";
 }
 
