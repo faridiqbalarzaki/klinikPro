@@ -433,7 +433,7 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
   const nlu = ctx.nlu || null;
   const texts = textsOf(text, nlu);
   const lowers = texts.map((t) => t.toLowerCase());
-  const aiObjection = aiHas(nlu, "OBJECTION");
+  const aiObjection = intentParser.isObjection(nlu); // AI (ambang rendah) ATAU kamus lokal
   if (lowers.some((l) => HANDOFF_REGEX.test(l)) || aiObjection) {
     let replyTemplate = null;
     const lt = (re) => lowers.some((l) => re.test(l));

@@ -55,6 +55,9 @@ const cfg = {
   AI_TIMEOUT_MS: Number(process.env.AI_TIMEOUT_MS) || 2500,
   // Keyakinan minimum agar hasil AI dipakai funnel (di bawah ini -> hanya aturan lokal)
   AI_MIN_CONFIDENCE: Number(process.env.AI_MIN_CONFIDENCE) || 0.7,
+  // Ambang khusus OBJECTION (lebih rendah: salah tangkap = handoff CS, lolos = form ke customer yang menawar)
+  AI_OBJECTION_MIN_CONFIDENCE:
+    Number(process.env.AI_OBJECTION_MIN_CONFIDENCE) || 0.5,
   AI_MAX_CONCURRENT: Number(process.env.AI_MAX_CONCURRENT) || 5,
   // Circuit breaker: sekian kali gagal beruntun -> lewati AI selama cooldown
   AI_CIRCUIT_FAILS: 3,

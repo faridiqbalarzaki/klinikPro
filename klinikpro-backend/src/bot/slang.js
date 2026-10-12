@@ -54,6 +54,37 @@ const SLANG = {
   kecmtn: "kecamatan",
   kcmtn: "kecamatan",
   kab: "kabupaten",
+  // keberatan harga / tawar / tunda dari berbagai daerah -> kata baku yang sudah dikenali SOP
+  // Jawa
+  larang: "mahal",
+  rega: "harga",
+  regane: "harganya",
+  piro: "berapa",
+  pira: "berapa",
+  sesuk: "nanti",
+  duwit: "uang",
+  duit: "uang",
+  bojo: "suami",
+  // Sunda
+  teuing: "banget",
+  engke: "nanti",
+  sabaraha: "berapa",
+  // Banjar / Palembang / Medan
+  banar: "banget",
+  nian: "banget",
+  kalik: "banget",
+  kada: "tidak",
+  idak: "tidak",
+  dak: "tidak",
+  katek: "tidak ada",
+  pacak: "bisa",
+  ikam: "kamu",
+  // nego
+  nego: "mahal",
+  negonya: "mahal",
+  nawar: "mahal",
+  menawar: "mahal",
+  dskon: "diskon",
   // singkatan umum
   yg: "yang",
   dgn: "dengan",
