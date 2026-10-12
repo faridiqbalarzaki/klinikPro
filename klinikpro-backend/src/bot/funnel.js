@@ -1,13 +1,18 @@
+const path = require("path");
 const db = require("../db");
 const inbox = require("../inbox");
 const priceFlow = require("../priceFlow");
-const { botStages: T } = require("./templates");
+const { botStages: T, csCommands, priceFlow: PT } = require("./templates");
 const state = require("./state");
 const cfg = require("./config");
 const { normalizeJid } = require("./jid");
 
-// Pemicu handoff (satu kata utuh, tidak peka huruf besar/kecil)
-const HANDOFF_REGEX = /\b(gajian|suami|batal|cancel|mahal|nanti)\b/i;
+const ASSET_DIR =
+  process.env.ASSET_DIR || path.join(__dirname, "..", "..", "assets");
+
+// Regex untuk mendeteksi kata kunci penolakan
+const HANDOFF_REGEX =
+  /\b(gajian|suami|batal|cancel|mahal|nanti|kemahalan|uang|paksu|ragu|takut)\b/i;
 
 async function isKnownCustomer(phone, jid) {
   jid = normalizeJid(jid);
@@ -18,8 +23,6 @@ async function isKnownCustomer(phone, jid) {
   return r.rowCount > 0;
 }
 
-// Saat funnel selesai (HANDOFF), buat tiket Inbox supaya CS melihat leadnya.
-// Gagal -> hanya dicatat; funnel tidak boleh terganggu.
 async function recordLeadTicket({ jid, phone, pushName, text }) {
   jid = normalizeJid(jid);
   try {
@@ -62,9 +65,6 @@ async function recordLeadTicket({ jid, phone, pushName, text }) {
   }
 }
 
-// Dipanggil SEGERA saat pesan masuk (sebelum debounce).
-// Return sesi jika customer ini harus ditangani bot (status BOT), selain itu null
-// (HANDOFF / pelanggan lama) -> pesan langsung diteruskan ke inbox.js tanpa ditahan.
 async function admit(jid) {
   jid = normalizeJid(jid);
   const phone = inbox.phoneFromJid(jid);
@@ -76,7 +76,7 @@ async function admit(jid) {
         funnel_stage: 0,
         status: "HANDOFF",
       });
-      return null; // pelanggan lama: bukan urusan funnel
+      return null;
     }
     await state.createSession(jid, {
       phoneNumber: phone,
@@ -85,16 +85,10 @@ async function admit(jid) {
     });
     session = await state.getSession(jid);
   }
-  if (isTakenOver(jid)) return null; // CS baru saja memakai slash command (DB mungkin belum tercatat)
+  if (isTakenOver(jid)) return null;
   return session && session.status === "BOT" ? session : null;
 }
 
-// ------------------------------------------------------------------
-// Takeover CS (in-memory). handleOutgoing memanggil markTakeover() SECARA SINKRON begitu
-// slash command terdeteksi, SEBELUM update DB selesai. Jadi funnel yang sedang berjalan
-// berhenti seketika dan funnel yang baru mulai pun tahu, walau DB belum sempat berubah.
-// Jendela 3 menit cukup untuk menutup jeda sampai HANDOFF tersimpan di DB.
-// ------------------------------------------------------------------
 const TAKEOVER_WINDOW_MS = 3 * 60 * 1000;
 const takeoverAt = new Map();
 
@@ -105,20 +99,15 @@ function markTakeover(jid) {
 const isTakenOver = (jid) =>
   Date.now() - (takeoverAt.get(jid) || 0) < TAKEOVER_WINDOW_MS;
 
-// Kirim urutan pesan funnel secara AMAN:
-//  - commit stage (dan HANDOFF pada closing) SEBELUM pesan pertama dikirim, jadi tidak ada
-//    jendela di mana customer sudah dibalas tetapi sesi masih di stage lama (anti-duplikat).
-//  - pesan pertama gagal  -> rollback stage (customer belum menerima apa pun, boleh diulang)
-//  - pesan ke-2 dst gagal -> dicatat saja; stage TETAP maju (customer sudah menerima sebagian,
-//    mengulang dari awal akan menggandakan pesan)
-//  - CS mengambil alih di tengah jalan -> sisa pesan dibatalkan
 async function deliver({ jid, steps, commit, rollback }) {
   if (isTakenOver(jid)) return "taken";
   await commit();
 
   for (let i = 0; i < steps.length; i++) {
     if (isTakenOver(jid)) {
-      console.log(`🛑 [Bot] ${jid}: CS mengambil alih, sisa pesan funnel dibatalkan.`);
+      console.log(
+        `🛑 [Bot] ${jid}: CS mengambil alih, sisa pesan funnel dibatalkan.`,
+      );
       return "taken";
     }
     try {
@@ -141,68 +130,104 @@ async function deliver({ jid, steps, commit, rollback }) {
   return "replied";
 }
 
-// Dipanggil SETELAH debounce, dengan teks gabungan. Return:
-//   "replied"     -> bot sudah membalas
-//   "ignored"     -> tidak ada yang perlu dilakukan (teks kosong)
-//   "silent"      -> chat HANDOFF / diambil alih CS: bot diam (teks hanya dicatat sebagai tiket)
 async function process_({ sender, msg, jid, text }) {
   jid = normalizeJid(jid);
 
-  // Stiker / voice note / reaction / pesan kosong TIDAK BOLEH memajukan funnel
   if (!text || !String(text).trim()) return "ignored";
 
   const phone = inbox.phoneFromJid(jid);
-  const session = await state.getSession(jid); // baca ulang: status bisa berubah selama debounce
+  const session = await state.getSession(jid);
   if (!session) return "silent";
 
-  // Aturan 1: hanya balas jika status BOT (dan CS belum mengambil alih)
   if (session.status !== "BOT" || isTakenOver(jid)) return "silent";
 
-  // Selama funnel aktif, SOP harga lama (priceFlow) jangan ikut membalas
   priceFlow.setConsultedNow(jid);
 
-  // Aturan 3: auto-handoff. Bot diam; teks dicatat sebagai tiket oleh inbox.js (mode silent)
-  if (HANDOFF_REGEX.test(text)) {
-    await state.updateSession(jid, { phoneNumber: phone, status: "HANDOFF" });
-    console.log(`🙋 [Bot] ${phone} HANDOFF (kata kunci): "${text.slice(0, 60)}"`);
+  const lowerText = text.toLowerCase();
+  const stage = session.funnel_stage;
+  const patch = (p) => state.updateSession(jid, { phoneNumber: phone, ...p });
+
+  const say =
+    (t, wait = 0) =>
+    async () => {
+      if (wait) await sender.sleep(cfg.gap(wait));
+      await sender.typing(jid);
+      await sender.sendText(jid, t);
+    };
+  const pic =
+    (file, caption, wait = 0) =>
+    async () => {
+      if (wait) await sender.sleep(cfg.gap(wait));
+      await sender.typing(jid);
+      await sender.sendImage(jid, file, caption);
+    };
+
+  // --- CEGAT PENOLAKAN (AUTO-OBJECTION HANDLING) ---
+  if (HANDOFF_REGEX.test(lowerText)) {
+    let replyTemplate = null;
+    if (/mahal|kemahalan|uang/i.test(lowerText))
+      replyTemplate = csCommands.mahal;
+    else if (/suami|paksu/i.test(lowerText)) replyTemplate = csCommands.paksu;
+    else if (/nanti|besok|kapan/i.test(lowerText))
+      replyTemplate = csCommands.nanti;
+    else if (/ragu|takut|efek/i.test(lowerText))
+      replyTemplate = csCommands.ragu;
+
+    if (replyTemplate) {
+      await deliver({
+        jid,
+        steps: [say(replyTemplate, 1500)],
+        commit: () => patch({ status: "HANDOFF" }),
+        rollback: () => patch({ status: "BOT" }),
+      });
+    } else {
+      await patch({ status: "HANDOFF" });
+    }
+    console.log(
+      `🙋 [Bot] ${phone} HANDOFF (objection): "${text.slice(0, 60)}"`,
+    );
     return "silent";
   }
 
-  const stage = session.funnel_stage;
-  const patch = (p) => state.updateSession(jid, { phoneNumber: phone, ...p });
-  // Tiap pesan: "mengetik..." dulu, baru kirim (jeda acak antar pesan, tidak seragam)
-  const say = (t, wait = 0) => async () => {
-    if (wait) await sender.sleep(cfg.gap(wait));
-    await sender.typing(jid);
-    await sender.sendText(jid, t);
-  };
-  const pic = (file, caption, wait = 0) => async () => {
-    if (wait) await sender.sleep(cfg.gap(wait));
-    await sender.typing(jid);
-    await sender.sendImage(jid, file, caption);
-  };
+  // --- CEGAT KATA KUNCI "HARGA" (PRICE FLOW) ---
+  if (
+    (stage === 0 || stage === 1) &&
+    /harga|berapa|pricelist|price/i.test(lowerText)
+  ) {
+    await deliver({
+      jid,
+      steps: [say(PT.askComplaint, 1500)],
+      commit: () => patch({ funnel_stage: 1 }),
+      rollback: () => patch({ funnel_stage: stage }),
+    });
+    return "replied";
+  }
 
   let result;
   switch (stage) {
-    case 0: // Welcome Ads
+    case 0:
       result = await deliver({
         jid,
-        steps: [say(T.welcomeAds), say(T.salam, cfg.DELAY_WELCOME_MS)],
+        steps: [say(T.salam, 1500)],
         commit: () => patch({ funnel_stage: 1 }),
         rollback: () => patch({ funnel_stage: 0 }),
       });
       break;
 
-    case 1: // Tanya Kecamatan
+    case 1:
       result = await deliver({
         jid,
-        steps: [say(T.kecamatan)],
+        steps: [
+          say(PT.step1Solusi, 1000),
+          pic("awal.jpeg", PT.step2Product, 2000),
+          pic("akhir.jpeg", PT.step3Testi, 2500),
+        ],
         commit: () => patch({ funnel_stage: 2 }),
         rollback: () => patch({ funnel_stage: 1 }),
       });
       break;
 
-    case 2: // Katalog Harga
+    case 2:
       result = await deliver({
         jid,
         steps: [
@@ -214,16 +239,14 @@ async function process_({ sender, msg, jid, text }) {
       });
       break;
 
-    case 3: // Format Order (closing) -> HANDOFF
+    case 3:
       result = await deliver({
         jid,
         steps: [
           say(T.isiform),
-          pic("FORMAT ORDER.jpeg", undefined, cfg.DELAY_BETWEEN_MS), // tanpa caption
+          pic("FORMAT ORDER.jpeg", undefined, cfg.DELAY_BETWEEN_MS),
           say(T.formatOrder, cfg.DELAY_BETWEEN_MS),
         ],
-        // HANDOFF dicommit SEBELUM mengirim: balasan customer saat bot masih mengirim
-        // sudah tidak akan memicu apa pun.
         commit: () => patch({ funnel_stage: 4, status: "HANDOFF" }),
         rollback: () => patch({ funnel_stage: 3, status: "BOT" }),
       });

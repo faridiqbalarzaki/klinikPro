@@ -69,4 +69,15 @@ module.exports = {
     proses: `Baik kak Lizel bantu proses pengiriman barangnya hari ini kak \nMohon ditunggu☺️ \n\nSimpan nomor aku ya kak ,next order / mau jadi reseller bisa chat kesini lagi🥰\n\nfree konsultasi yah ka, jadi selama pemakaian kaka bisa konsultasi terus sama Lizel 😘🙏`,
     carapakai: `🌸CARA PEMAKAIAN FIX NUTRI COLLAGEN BEAUTY SOAP🌸\n\nnote : Simpan di tempat sejuk dan kering terhindar dari sinar matahari langsung\n\nBerikut cara pemakaian:\n1. Cuci wajah hingga bersih\n2. Gunakan Facial Wash bisa dengan Fix Nutri Collagen beauty soap😍🫧\n3. Keringkan Wajah menggunakan tissue wajah \n\nNext ⬇️\n\nPenggunaan Day Cream☀️✅\n\n1. Setelah membersihkan wajah dengan Facial Wash\n2. Ambil Day Cream secukupnya\n3. Oleskan secara merata pada wajah dan leher tidak perlu menggunakan sunscreen karena sudah ada kandungan SPF 50 +++\n4. Tunggu hingga Meresap selama 2 menit baru bisa ditimpa dengan bedak atau make up lainnya🌸😍\n\nNext⬇️\n\nPenggunaan Night Cream🌙⬇️\n\n1. Bersihkan wajah sebelum tidur\n2. Gunakan serum yang cocok jika diperlukan\n3. Oleskan night cream secara merata pada wajah dan leher\n4. Tepuk perlahan hingga meresap\n5. Hindari penggunaan cream di area lipatan wajah seperti :sudut bibir`,
   },
+
+  // ==========================================
+  // 3. TAMBAHAN: TEMPLATE PRICE FLOW & AUTO GREETING
+  // ==========================================
+  priceFlow: {
+    askComplaint: `Hallo kakak sebelum keharga bisa di konsultasikan yaah keluhannya apa? Biar aku bantu untuk kasih saran yang paling cocok untuk kakak 💖✨`,
+    step1Solusi: `Lizel bantu berikan solusi yaa kak say🤗`,
+    step2Product: `✨ PAKET GLOWING 12 HARI - FIX NUTRI D&N CREAM ✨\n\nPaket lengkap 3 rangkaian perawatan:\n\n☀️ Day Cream - membantu mencerahkan kulit dan melindungi kulit saat beraktivitas\n🌙 Night Cream - membantu menyamarkan flek dan noda hitam saat kulit beristirahat di malam hari\n🧼 Collagen Beauty Soap - membersihkan lembut dan membantu menjaga kelembapan kulit\n\n💖 Manfaat yang bisa Kakak rasakan:\n• Mencerahkan kulit wajah\n• Menyamarkan flek dan noda hitam\n• Membantu menjaga skin barrier\n• Kulit tampak lebih lembap, halus, dan glowing merata\n\nGunakan rutin sesuai aturan pakai ya Kak 🤍`,
+    step3Testi: `✨ FIX NUTRI GLOW SERIES✨\n\n🤍 Produk ini tidak mengandung merkuri maupun steroid, sehingga aman digunakan sesuai aturan pakai dan tidak menyebabkan ketergantungan.\n\n✅ Sudah terdaftar BPOM\n✅ Bersertifikat Halal\n✅ Cocok digunakan untuk perawatan kulit sehari-hari\n\n😊 Boleh tahu ya Kak, saat ini Kakak berdomisili di Kecamatan mana? Nanti aku cek promo dan estimasi pengiriman ke lokasi Kakak. 📦💖`,
+  },
+  autoGreeting: `Halo Kak! Terima kasih sudah menghubungi Lizel kembali 🥰 Ada yang bisa Lizel bantu? (Mau konsultasi lanjutan atau repeat order paketnya nih Kak?) 📦✨`,
 };
