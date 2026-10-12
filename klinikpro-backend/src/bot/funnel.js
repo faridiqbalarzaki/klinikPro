@@ -7,6 +7,8 @@ const state = require("./state");
 const cfg = require("./config");
 const { normalizeJid } = require("./jid");
 const intentParser = require("./intentParser");
+const replies = require("./replies");
+const { detectTopic } = require("./topics");
 
 const ASSET_DIR =
   process.env.ASSET_DIR || path.join(__dirname, "..", "..", "assets");
@@ -425,47 +427,72 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
       await sender.sendImage(jid, file, caption);
     };
 
-  // --- CEGAT PENOLAKAN (AUTO-OBJECTION HANDLING) ---
-  // Tetap aktif untuk semua pesan, termasuk bubble susulan.
-  // Regex lokal dicek pada teks asli + teks ter-normalisasi slang. AI (OBJECTION) hanya
-  // menambah penangkapan untuk gaya bahasa yang lolos regex; template yang dikirim
-  // tetap template SOP milik kita.
+  // --- TOPIK PERTANYAAN UMUM (ongkir, COD, BPOM, dst) ---
+  // Dari AI (jika yakin) atau dari kamus lokal; dihitung dulu karena memengaruhi penanganan
+  // keberatan ("takut efek samping" = pertanyaan keamanan, bukan penolakan).
   const nlu = ctx.nlu || null;
   const texts = textsOf(text, nlu);
   const lowers = texts.map((t) => t.toLowerCase());
-  const aiObjection = intentParser.isObjection(nlu); // AI (ambang rendah) ATAU kamus lokal
-  if (lowers.some((l) => HANDOFF_REGEX.test(l)) || aiObjection) {
-    let replyTemplate = null;
-    const lt = (re) => lowers.some((l) => re.test(l));
-    if (lt(/mahal|kemahalan|uang/i)) replyTemplate = csCommands.mahal;
-    else if (lt(/suami|paksu/i)) replyTemplate = csCommands.paksu;
-    else if (lt(/nanti|besok|kapan/i)) replyTemplate = csCommands.nanti;
-    else if (lt(/ragu|takut|efek/i)) replyTemplate = csCommands.ragu;
-    else if (aiObjection) {
-      // Tidak ada kata kunci lokal: pakai klasifikasi AI -> template yang sama
-      replyTemplate =
-        {
-          mahal: csCommands.mahal,
-          paksu: csCommands.paksu,
-          nanti: csCommands.nanti,
-          ragu: csCommands.ragu,
-        }[nlu.entities.objection_type] || null; // batal/lainnya -> handoff tanpa template
-    }
+  const mem = replies.getMem(jid);
+  const nluTopic =
+    nlu && (nlu.source === "local" || nlu.confidence >= 0.5)
+      ? nlu.entities?.topic
+      : null;
+  const topic =
+    nluTopic ||
+    texts.map((t) => detectTopic(priceFlow.normalizeText(t))).find(Boolean) ||
+    null;
 
-    if (replyTemplate) {
+  // --- PENANGANAN KEBERATAN (OBJECTION) YANG ELEGAN ---
+  // Tetap aktif untuk semua pesan, termasuk bubble susulan.
+  // Pertama & kedua: empati -> nilai (BPOM) -> tawarkan paket hemat / promo / keep order / COD,
+  // sesi TETAP di tahap yang sama (customer bisa langsung memilih paket).
+  // Setelah MAX_OBJECTION_REPLIES atau customer membatalkan: baru diserahkan ke CS.
+  const aiObjection = intentParser.isObjection(nlu); // AI (ambang rendah) ATAU kamus lokal
+  const lt = (re) => lowers.some((l) => re.test(l));
+  let objType = null;
+  if (lowers.some((l) => HANDOFF_REGEX.test(l)) || aiObjection) {
+    if (lt(/batal|cancel/i)) objType = "batal";
+    else if (lt(/mahal|kemahalan|uang/i)) objType = "mahal";
+    else if (lt(/suami|paksu/i)) objType = "paksu";
+    else if (lt(/nanti|besok|kapan|gajian/i)) objType = "nanti";
+    else if (lt(/ragu|takut/i)) objType = "ragu";
+    else if (aiObjection) objType = nlu.entities.objection_type || "lainnya";
+    else objType = "lainnya";
+    if (objType === "ragu" && topic === "SAFETY") objType = null; // pertanyaan keamanan -> dijawab di FAQ
+  }
+  if (objType) {
+    const n = ++mem.objections;
+    const toCS = objType === "batal" || n > cfg.MAX_OBJECTION_REPLIES;
+    if (toCS) {
+      const line =
+        objType === "batal"
+          ? replies.HANDOFF.cancel
+          : replies.HANDOFF.objection;
       await deliver({
         jid,
-        steps: [say(replyTemplate, 1500)],
+        steps: [say(line, 1200)],
         commit: () => patch({ status: "HANDOFF" }),
         rollback: () => patch({ status: "BOT" }),
       });
-    } else {
-      await patch({ status: "HANDOFF" });
+      console.log(
+        `🙋 [Bot] ${phone} HANDOFF (objection ${objType} #${n}): "${text.slice(0, 60)}"`,
+      );
+      markTurn(jid, true);
+      return "silent";
     }
+    const r = await deliver({
+      jid,
+      steps: [say(replies.objectionReply(objType, n, mem), 1500)],
+      // stage tetap; commit hanya memperbarui updated_at (timer anti-ghosting)
+      commit: () => patch({ funnel_stage: stage }),
+      rollback: async () => {},
+    });
     console.log(
-      `🙋 [Bot] ${phone} HANDOFF (objection): "${text.slice(0, 60)}"`,
+      `💬 [Bot] ${phone} objection ${objType} #${n} dijawab bot (stage ${stage}): "${text.slice(0, 60)}"`,
     );
-    return "silent";
+    markTurn(jid, r === "replied");
+    return r === "taken" ? "silent" : "replied";
   }
 
   // --- STRICT STAGE VALIDATION: SERAP BUBBLE SUSULAN ---
@@ -486,6 +513,55 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
   // baru jadi true jika balasan benar-benar terkirim (jadi giliran yang gagal tidak
   // membuat bubble susulan berikutnya ikut diserap).
   markTurn(jid, false);
+
+  // --- PERTANYAAN UMUM (ongkir, COD, BPOM, cara pakai, dst): JAWAB LANGSUNG ---
+  // Anti-reset: pertanyaan di tengah alur dijawab di tempat, TIDAK mengulang menu / pertanyaan
+  // keluhan dari awal. Jawaban ditutup ajakan lanjut sesuai tahap (soft-selling).
+  //  - customer SEKALIGUS menjawab pertanyaan tahap ini -> jawaban FAQ jadi pembuka,
+  //    lalu alur normal jalan (lihat `lead` di bawah).
+  //  - tidak menjawab tahap ini -> FAQ + ajakan lanjut, stage tetap.
+  const ent = nlu?.entities || {};
+  const stageAnswered =
+    stage === 3
+      ? texts.some((t) => ORDER_INTENT_RE.test(priceFlow.normalizeText(t))) ||
+        aiHas(nlu, "ORDER_INTENT") ||
+        !!ent.package
+      : stage === 2
+        ? !!ent.kecamatan || aiHas(nlu, "KECAMATAN")
+        : texts.some((t) => priceFlow.isComplaint(t)) ||
+          aiHas(nlu, "COMPLAINT") ||
+          !!ent.complaint; // stage 0 & 1
+  const faqText = topic ? replies.faqBody(topic, mem) : null;
+  let lead = [];
+  if (faqText && stage <= 3) {
+    if (stageAnswered) {
+      lead = [say(faqText, 1200)];
+    } else {
+      mem.faqs++;
+      mem.lastTopic = topic;
+      const toCS = mem.faqs > cfg.MAX_FAQ_REPLIES;
+      const nextStage = stage === 0 ? 1 : stage;
+      const r = await deliver({
+        jid,
+        steps: [
+          say(
+            toCS
+              ? replies.HANDOFF.many
+              : `${faqText}\n\n${replies.cta(nextStage, mem)}`,
+            1500,
+          ),
+        ],
+        commit: () =>
+          patch(toCS ? { status: "HANDOFF" } : { funnel_stage: nextStage }),
+        rollback: () => patch({ funnel_stage: stage, status: "BOT" }),
+      });
+      console.log(
+        `💬 [Bot] ${phone} FAQ ${topic} dijawab (stage ${stage}${toCS ? ", -> CS" : ""}): "${text.slice(0, 60)}"`,
+      );
+      markTurn(jid, r === "replied");
+      return r === "taken" || toCS ? "silent" : "replied";
+    }
+  }
 
   // --- CEGAT KATA KUNCI "HARGA" (PRICE FLOW) ---
   // Stage 0: tahan harga, tanyakan keluhan dulu. (Stage 1 ditangani penilai jawaban
@@ -514,13 +590,24 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
           2: T.kecamatan,
           3: T.harga_tanya,
         };
+        // Tanya-ulang yang nyambung & hangat. Satu-satunya yang tetap SOP persis:
+        // customer minta harga di stage 1 (harga ditahan, keluhan ditanyakan dulu).
+        const greeting =
+          aiHas(nlu, "GREETING") ||
+          (nlu?.source === "local" && nlu.intent === "GREETING");
+        const reaskLine =
+          stage === 1 && priceAsk
+            ? reaskText[1]
+            : greeting
+              ? replies.greetMid(stage, mem)
+              : replies.confused(stage, mem);
         const steps =
           verdict === "catalog"
             ? [
                 pic("HARGA PROMO.jpeg", T.harga_katalog),
                 say(T.harga_tanya, cfg.DELAY_BETWEEN_MS),
               ]
-            : [say(reaskText[stage], 1500)];
+            : [say(reaskLine, 1500)];
         console.log(
           `🔁 [Bot] ${phone}: ${verdict} di stage ${stage} (${n}/${limit}): "${text.slice(0, 60)}"`,
         );
@@ -546,12 +633,20 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
     }
   }
 
+  // Ingat apa yang sudah disebut customer (dipakai untuk menyapa lebih personal)
+  if (stage === 1 && !mem.complaint) {
+    const mc = priceFlow.matchComplaint(text);
+    mem.complaint =
+      ent.complaint || (mc && mc.kind === "keyword" ? mc.keyword : null);
+  }
+  if (stage === 2 && !mem.kecamatan) mem.kecamatan = ent.kecamatan || null;
+
   let result;
   switch (stage) {
     case 0:
       result = await deliver({
         jid,
-        steps: [say(T.salam, 1500)],
+        steps: [...lead, say(T.salam, 1500)],
         commit: () => patch({ funnel_stage: 1 }),
         rollback: () => patch({ funnel_stage: 0 }),
       });
@@ -561,6 +656,7 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
       result = await deliver({
         jid,
         steps: [
+          ...lead,
           say(PT.step1Solusi, 1000),
           pic("awal.jpeg", PT.step2Product, 2000),
           pic("akhir.jpeg", PT.step3Testi, 2500),
@@ -574,6 +670,7 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
       result = await deliver({
         jid,
         steps: [
+          ...lead,
           pic("HARGA PROMO.jpeg", T.harga_katalog),
           say(T.harga_tanya, cfg.DELAY_BETWEEN_MS),
         ],
@@ -586,6 +683,7 @@ async function process_({ sender, msg, jid, text, ctx = {} }) {
       result = await deliver({
         jid,
         steps: [
+          ...lead,
           say(T.isiform),
           pic("FORMAT ORDER.jpeg", undefined, cfg.DELAY_BETWEEN_MS),
           say(T.formatOrder, cfg.DELAY_BETWEEN_MS),

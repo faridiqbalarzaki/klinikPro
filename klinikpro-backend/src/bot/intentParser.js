@@ -11,6 +11,7 @@
 const priceFlow = require("../priceFlow");
 const cfg = require("./config");
 const { normalizeSlang } = require("./slang");
+const { TOPICS, detectTopic } = require("./topics");
 
 const INTENTS = [
   "GREETING", // sapaan / salam / basa-basi saja
@@ -118,6 +119,7 @@ const RESPONSE_SCHEMA = {
           enum: OBJECTION_TYPES,
           nullable: true,
         },
+        topic: { type: "STRING", enum: TOPICS, nullable: true },
       },
     },
   },
@@ -174,6 +176,7 @@ function localParse(text, stage) {
     kecamatan: null,
     package: null,
     objection_type: null,
+    topic: detectTopic(norm),
   };
 
   let objection = false;
@@ -276,6 +279,7 @@ function validate(raw) {
       objection_type: OBJECTION_TYPES.includes(e.objection_type)
         ? e.objection_type
         : null,
+      topic: TOPICS.includes(e.topic) ? e.topic : null,
     },
   };
 }
@@ -289,6 +293,7 @@ function validate(raw) {
 function harden(v, local) {
   const out = { ...v, intents: [...v.intents], entities: { ...v.entities } };
   const has = (i) => out.intents.includes(i);
+  out.entities.topic ||= local.entities.topic; // kamus lokal melengkapi AI
 
   if (local.localObjection && !has("OBJECTION")) {
     out.intents.unshift("OBJECTION");

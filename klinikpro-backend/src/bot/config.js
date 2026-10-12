@@ -46,6 +46,11 @@ const cfg = {
   STUCK_CHECK_MS: 60 * 1000,
   STUCK_BATCH: 3, // maks. dikirim per pengecekan (jeda antar kirim 4-8 detik)
 
+  // Keberatan (mahal/ragu/nanti): bot menjawab dulu sebanyak ini, setelahnya diserahkan ke CS.
+  MAX_OBJECTION_REPLIES: Number(process.env.FUNNEL_MAX_OBJECTION_REPLIES) || 2,
+  // Pertanyaan umum (ongkir/COD/BPOM...) yang dijawab bot per sesi sebelum diserahkan ke CS.
+  MAX_FAQ_REPLIES: Number(process.env.FUNNEL_MAX_FAQ_REPLIES) || 6,
+
   // AI Intent Parser (Gemini Flash). Kosongkan GEMINI_API_KEY / set AI_PARSER_ENABLED=false
   // untuk mematikan; bot otomatis memakai regex lokal saja.
   AI_API_KEY: process.env.GEMINI_API_KEY || "",
