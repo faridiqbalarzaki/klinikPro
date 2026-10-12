@@ -8,6 +8,14 @@ const media = require("./media");
 const audio = require("./audio");
 const inbox = require("./inbox");
 const priceFlow = require("./priceFlow");
+// Bot funnel + slash command CS bersifat tambahan: jika bermasalah, WhatsApp tetap harus tersambung.
+let waBot = null;
+try {
+  waBot = require("./bot");
+} catch (err) {
+  console.error(`⚠️  Bot funnel dinonaktifkan: ${err.message}`);
+  waBot = null;
+}
 // Fitur Label WA bersifat tambahan: jika modulnya bermasalah, WhatsApp tetap harus tersambung.
 let labels = null;
 try {
@@ -117,6 +125,15 @@ function releaseLock() {
 }
 
 process.on("exit", releaseLock);
+
+// Jaring pengaman: kegagalan jaringan yang lolos dari try/catch (mis. sendMessage timeout)
+// hanya dicatat. Tanpa ini Node >= 15 menghentikan proses dan PM2 restart-loop.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "⚠️  Unhandled Promise Rejection (proses tetap berjalan):",
+    reason instanceof Error ? reason.stack || reason.message : reason,
+  );
+});
 
 // ==========================================
 // KONFIGURASI
@@ -231,8 +248,9 @@ async function openSocket() {
       return;
     }
 
-    // Abaikan pesan sinkronisasi lama, hanya proses pesan notifikasi baru
-    if (upsert.type !== "notify") return;
+    // Pesan customer hanya dari "notify". "append" ikut diteruskan karena pesan yang
+    // diketik CS dari HP kadang datang sebagai append (hanya slash command yang diproses).
+    if (upsert.type !== "notify" && upsert.type !== "append") return;
 
     handleIncomingMessages(s, upsert).catch((err) => {
       console.error("❌ Pesan masuk:", err.message);
@@ -341,7 +359,7 @@ function formatTanggal(date) {
 // ==========================================
 const flowBusy = new Set(); // JID yang sedang menerima Langkah 1-3 (cegah kirim ganda)
 
-function extractText(content) {
+function extractTextBasic(content) {
   return (
     content.conversation ||
     content.extendedTextMessage?.text ||
@@ -349,6 +367,13 @@ function extractText(content) {
     content.videoMessage?.caption ||
     ""
   );
+}
+
+// Versi lengkap (quoted reply, caption dokumen, jawaban tombol / daftar) ada di bot/text.js.
+// Jika modul bot tidak aktif, pakai versi dasar di atas.
+function extractText(content) {
+  const full = waBot?.extractText ? waBot.extractText(content) : "";
+  return full || extractTextBasic(content);
 }
 
 function readAsset(filePath) {
@@ -497,13 +522,34 @@ async function saveIncomingImage(s, msg) {
 }
 
 async function handleIncomingMessages(s, upsert) {
-  for (const msg of upsert.messages || []) {
-    // Abaikan pesan kosong & pesan dari kita sendiri
-    if (!msg?.message || msg.key?.fromMe) continue;
+  const messages = (upsert.messages || []).filter((msg) => {
+    if (!msg?.message) return false; // pesan kosong
+    const jid = msg.key?.remoteJid;
+    // grup & status/broadcast
+    return Boolean(jid) && !jid.endsWith("@g.us") && !jid.endsWith("@broadcast");
+  });
 
-    // Abaikan grup & status/broadcast
-    const jid = msg.key.remoteJid;
-    if (!jid || jid.endsWith("@g.us") || jid.endsWith("@broadcast")) continue;
+  // FASE 1 - slash command CS: diproses PALING DULU dan tidak menunggu pesan customer mana pun
+  // (pemrosesan customer di bawah bisa makan waktu detik: DB, balasan funnel, auto-reply inbox).
+  // Command langsung dihapus sebelum customer sempat melihatnya.
+  if (waBot) {
+    for (const msg of messages) {
+      if (!msg.key?.fromMe) continue;
+      try {
+        const content = normalizeContent(msg.message) || msg.message;
+        await waBot.handleOutgoing(s, msg, extractText(content));
+      } catch (err) {
+        console.error("❌ Slash command:", err.message);
+      }
+    }
+  }
+
+  // FASE 2 - pesan customer
+  for (const msg of messages) {
+    if (msg.key?.fromMe) continue; // pesan CS sendiri: hanya slash command (fase 1)
+
+    // Pesan customer: hanya event "notify"
+    if (upsert.type !== "notify") continue;
 
     const content = normalizeContent(msg.message) || msg.message;
 
@@ -512,12 +558,41 @@ async function handleIncomingMessages(s, upsert) {
       saveIncomingImage(s, msg);
     }
 
+    // 1b. Funnel bot (stage 0-3). Hasil:
+    //   "replied" / "ignored" -> selesai (bot membalas / pesan kosong diabaikan), jangan ke inbox.js
+    //   "silent"              -> HANDOFF / pelanggan lama: ke inbox.js HANYA untuk dicatat (tiket), tanpa balasan
+    //   "passthrough"         -> bukan urusan bot: inbox.js seperti biasa
+    let silent = false;
+    if (waBot) {
+      try {
+        // forward = jalur ke inbox.js; dipakai bot untuk media customer (foto alamat, dll.)
+        // dan untuk pesan gabungan yang berujung HANDOFF
+        const forward = (m, opts = {}) =>
+          inbox.handleUpsert(
+            s,
+            { type: "notify", messages: [m] },
+            { send: sendDirect, silent: Boolean(opts.silent) },
+          );
+        const r = await waBot.handleIncoming(s, msg, extractText(content), {
+          forward,
+          getSock: () => sock, // socket terbaru (bisa berganti saat reconnect)
+        });
+        if (r === "replied" || r === "ignored") continue;
+        silent = r === "silent";
+      } catch (err) {
+        console.error("❌ Funnel bot:", err.message);
+        // Status chat tidak diketahui (mis. DB putus): lebih baik diam daripada
+        // membalas customer yang mungkin sedang ditangani CS.
+        silent = true;
+      }
+    }
+
     // 2. Teruskan seluruh logika ke inbox.js
     try {
       await inbox.handleUpsert(
         s,
         { ...upsert, messages: [msg] },
-        { send: sendDirect },
+        { send: sendDirect, silent },
       );
     } catch (err) {
       console.error("❌ Inbox:", err.message);
@@ -938,6 +1013,8 @@ async function startWorker() {
   if (!acquireLock()) return; // proses lain sudah memegang sesi WhatsApp
   running = true;
   console.log("🔄 Sistem antrean pesan KlinikPro berjalan...");
+  // Timer anti-ghosting (/stuck otomatis) untuk customer yang menggantung di funnel
+  waBot?.startStuckTimer?.(() => (isConnected() ? sock : null));
 
   // Item yang tertahan di 'processing' saat proses mati tidak dikirim ulang
   // (bisa jadi sudah terkirim), jadi ditandai gagal agar bisa dicek manual.
@@ -967,6 +1044,7 @@ async function startWorker() {
 
 function stopWorker() {
   running = false;
+  waBot?.stopStuckTimer?.();
   if (reconnectTimer) clearTimeout(reconnectTimer);
   try {
     sock?.end?.(undefined);

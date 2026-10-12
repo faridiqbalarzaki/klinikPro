@@ -617,9 +617,12 @@ async function processMessage(sock, msg, deps) {
     ? priceFlow.matchComplaint(content.text)
     : null;
   let priceComplaint = false; // pesan ini sudah dijawab alur SOP
-  let skipAutoReply = false; // harga otomatis ditahan (CS yang menangani)
+  // Mode silent (chat HANDOFF): hanya catat tiket, TIDAK ADA balasan apa pun ke customer
+  let skipAutoReply = Boolean(deps.silent); // harga otomatis ditahan (CS yang menangani)
 
-  if (priceFlow.hasConsultedWithin24h(jid)) {
+  if (deps.silent) {
+    dbg(`Nomor ${phone} HANDOFF (mode silent): SOP & auto-reply dilewati.`);
+  } else if (priceFlow.hasConsultedWithin24h(jid)) {
     // Sudah konsultasi <24 jam: SOP tidak boleh jalan lagi, apa pun isi
     // pesannya (lokasi, harga, dll). Lanjut ke auto-reply/tiket.
     dbg(`Nomor ${phone} sudah konsultasi <24 jam, SOP dilewati.`);
@@ -798,6 +801,7 @@ async function handleUpsert(sock, upsert, deps = {}) {
         return "teks";
       }),
     sleep: deps.sleep || sleep,
+    silent: Boolean(deps.silent), // true = hanya catat tiket, jangan membalas
     tz: deps.tz || process.env.APP_TIMEZONE || "Asia/Jakarta",
     // FITUR BARU: Berikan akses fungsi downloadImage ke processMessage via depedency injection
     saveMedia: deps.saveMedia || ((m) => downloadImage(sock, m)),

@@ -11,6 +11,10 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: false, // Wajib untuk cloud database seperti Neon
   },
+  max: Number(process.env.PG_POOL_MAX) || 10,
+  idleTimeoutMillis: 30000, // lepas koneksi menganggur (Neon memutus koneksi idle sendiri)
+  connectionTimeoutMillis: 10000, // jangan menunggu koneksi selamanya -> query gagal cepat, bukan menggantung
+  keepAlive: true,
 });
 
 pool.on("error", (err) => {
